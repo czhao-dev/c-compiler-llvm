@@ -445,8 +445,3 @@ example.mc:5:18: warning: division by zero
     int bad = total / 0;
                     ^
 ```
-
----
-
-For the phase-by-phase build plan, timeline, and further reading, see
-[docs/ROADMAP.md](docs/ROADMAP.md).
