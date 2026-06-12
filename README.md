@@ -9,11 +9,11 @@
 
 ## Status
 
-The lexer and the `--emit-tokens` CLI flag are implemented and tested.
-The parser, semantic analyzer, static analyzer, and LLVM IR generator are
-stubbed so the project builds cleanly while each phase is added. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and
-timeline.
+The lexer, AST, and recursive-descent parser are implemented and tested,
+along with the `--emit-tokens` and `--emit-ast` CLI flags. The semantic
+analyzer, static analyzer, and LLVM IR generator are stubbed so the project
+builds cleanly while each phase is added. See [docs/ROADMAP.md](docs/ROADMAP.md)
+for the phase-by-phase build plan and timeline.
 
 ---
 

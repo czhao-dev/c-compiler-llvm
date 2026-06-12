@@ -12,7 +12,11 @@ int main() {
     assert(!tokens.empty());
     assert(tokens.back().type == minic::TokenType::EndOfFile);
 
-    assert(minic::parserStatus().find("not implemented") != std::string::npos);
+    minic::Parser parser(tokens);
+    const auto program = parser.parseProgram();
+    assert(program.functions.size() == 1);
+    assert(program.functions[0]->name == "main");
+
     assert(minic::semanticAnalyzerStatus().find("not implemented") != std::string::npos);
     assert(!minic::codegenStatus().empty());
     return 0;

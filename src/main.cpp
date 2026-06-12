@@ -105,13 +105,16 @@ int main(int argc, char **argv) {
         }
 
         if (options.emitAst) {
-            std::cerr << minic::parserStatus() << '\n';
-            return 1;
+            minic::Lexer lexer(source, options.inputPath);
+            minic::Parser parser(lexer.tokenize());
+            const minic::ProgramNode program = parser.parseProgram();
+            program.print(std::cout);
+            return 0;
         }
 
         if (options.emitIr) {
             std::cerr << minic::codegenStatus() << '\n';
-            std::cerr << "IR emission will be added after parser and semantic analysis phases.\n";
+            std::cerr << "IR emission will be added after the semantic analysis phase.\n";
             return 1;
         }
 

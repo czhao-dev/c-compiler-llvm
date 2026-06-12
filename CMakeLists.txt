@@ -10,6 +10,7 @@ option(MINIC_ENABLE_LLVM "Try to discover and link LLVM for future codegen work"
 
 add_library(minic_core
     src/lexer.cpp
+    src/ast.cpp
     src/parser.cpp
     src/sema.cpp
     src/codegen.cpp
@@ -44,3 +45,8 @@ add_test(NAME lexer_test COMMAND lexer_test)
 add_executable(smoke_test tests/smoke_test.cpp)
 target_link_libraries(smoke_test PRIVATE minic_core)
 add_test(NAME smoke_test COMMAND smoke_test)
+
+add_executable(parser_test tests/parser_test.cpp)
+target_link_libraries(parser_test PRIVATE minic_core)
+target_compile_definitions(parser_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
+add_test(NAME parser_test COMMAND parser_test)
