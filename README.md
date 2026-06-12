@@ -1,0 +1,452 @@
+# MiniC Compiler
+
+> A compiler for a statically-typed subset of C — from hand-written source
+> code through a lexer, parser, semantic analyzer, dataflow-based static
+> analyzer, and LLVM IR generator, producing native binaries that run without
+> any runtime dependency.
+
+---
+
+## Status
+
+The lexer and the `--emit-tokens` CLI flag are implemented and tested.
+The parser, semantic analyzer, static analyzer, and LLVM IR generator are
+stubbed so the project builds cleanly while each phase is added. See
+[docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and
+timeline.
+
+---
+
+## Overview
+
+MiniC takes C source files using a well-defined subset of the language and
+compiles them to native machine code through a complete compiler pipeline:
+a hand-written lexer, a recursive descent parser, a semantic analyzer that
+catches type errors and undeclared variables, a dataflow-based static analyzer
+that detects bug-prone patterns (uninitialized reads, unreachable code, unused
+variables), and an LLVM IR code generator that produces binaries via the LLVM
+backend.
+
+Because the source language is a real subset of C — not an invented DSL —
+the project requires no explanation of what the language does or why it
+exists. Anyone who has written C can read a MiniC program and immediately
+understand it.
+
+The project demonstrates a complete understanding of how a compiler works
+end to end: how source text becomes tokens, how tokens become a structured
+tree, how that tree is type-checked and analyzed for bugs, and how it becomes
+LLVM IR that the backend turns into a runnable binary. The static analyzer in
+particular demonstrates dataflow analysis — control-flow graph construction,
+reaching definitions, and liveness — which is the theoretical core of both
+compiler optimization and EDA verification tooling.
+
+---
+
+## Supported Language Features
+
+MiniC supports a deliberately constrained subset of C. Every feature in
+scope is fully supported; anything outside scope is a clear compile error.
+
+**Types**
+`int`, `float`, `char`, and `void` (for function return types only).
+No pointers, no arrays, no structs in the first version.
+
+**Variables**
+Local variable declarations with initializers (`int x = 5;`),
+assignment statements (`x = x + 1;`), and use of variables in expressions.
+
+**Arithmetic operators**
+`+`, `-`, `*`, `/` with standard precedence and associativity.
+Integer division truncates toward zero, matching C semantics.
+
+**Comparison and logical operators**
+`==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`.
+All comparisons produce an `int` result (0 or 1), matching C.
+
+**Control flow**
+`if`/`else`, `while`, and `for` loops. Nested control flow is fully
+supported. `break` and `continue` inside loops.
+
+**Functions**
+Function declarations with typed parameters and return types, function
+calls, and `return` statements. Recursive functions are supported because
+the IR generator handles forward references correctly.
+
+**Built-in I/O**
+`printf` is available as a special built-in that maps to the C standard
+library `printf` via an `extern` declaration in the generated IR.
+This is enough to write programs that produce visible output.
+
+---
+
+## Example MiniC Programs
+
+```c
+// examples/fibonacci.mc
+
+int fibonacci(int n) {
+    if (n <= 1) {
+        return n;
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+int main() {
+    int i = 0;
+    while (i < 10) {
+        printf("%d\n", fibonacci(i));
+        i = i + 1;
+    }
+    return 0;
+}
+```
+
+```c
+// examples/sum_of_squares.mc
+
+float sum_of_squares(int n) {
+    float total = 0.0;
+    int i = 1;
+    while (i <= n) {
+        float fi = i;
+        total = total + fi * fi;
+        i = i + 1;
+    }
+    return total;
+}
+
+int main() {
+    printf("%f\n", sum_of_squares(100));
+    return 0;
+}
+```
+
+---
+
+## Pipeline Architecture
+
+```
+Source file (.mc)
+        │
+        ▼
+    Lexer                  reads characters, emits a flat stream of tokens
+                           (keywords, identifiers, literals, operators)
+        │  token stream
+        ▼
+    Parser                 recursive descent, consumes token stream,
+                           builds an Abstract Syntax Tree (AST)
+        │  AST
+        ▼
+    Semantic Analyzer      walks the AST, checks:
+                           - all variables declared before use
+                           - types are compatible across assignments
+                           - function call argument counts match
+                           - return type matches function declaration
+        │  typed AST
+        ▼
+    Static Analyzer        builds a control-flow graph per function and
+                           runs dataflow analyses to report warnings:
+                           - uninitialized variable reads
+                           - unreachable (dead) code
+                           - unused variables and functions
+                           - missing return on a non-void path
+                           - constant-divisor division by zero
+        │  typed AST (+ warnings)
+        ▼
+    LLVM IR Generator      walks the typed AST, emits LLVM IR using
+                           IRBuilder — one IR instruction per AST node
+        │  LLVM IR (.ll)
+        ▼
+    LLVM Backend           invoke llc or clang to compile IR to a
+                           native binary or object file
+        │
+        ▼
+    Native Binary
+```
+
+> The static analyzer reports **warnings**, not errors — it does not block
+> compilation. This mirrors how production analyzers (clang-tidy, cppcheck)
+> behave: they surface likely bugs while leaving the decision to the developer.
+
+---
+
+## Pipeline Walkthrough — fibonacci(5)
+
+This is an end-to-end trace showing what each stage of the pipeline does.
+
+**Source**
+```c
+int fibonacci(int n) {
+    if (n <= 1) { return n; }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+```
+
+**After lexing** — a flat list of tokens:
+```
+TOK_INT  TOK_IDENT("fibonacci")  TOK_LPAREN  TOK_INT  TOK_IDENT("n")
+TOK_RPAREN  TOK_LBRACE  TOK_IF  TOK_LPAREN  TOK_IDENT("n")
+TOK_LEQ  TOK_NUMBER(1)  ...
+```
+
+**After parsing** — an AST:
+```
+FuncDef(fibonacci, [Param(int, n)], int)
+  IfStmt
+    BinOp(<=, Ident(n), Number(1))
+    Return(Ident(n))
+  Return
+    BinOp(+,
+      Call(fibonacci, [BinOp(-, Ident(n), Number(1))]),
+      Call(fibonacci, [BinOp(-, Ident(n), Number(2))]))
+```
+
+**After semantic analysis** — the AST is unchanged but every node
+carries a resolved type. The analyzer confirms `n` is declared as `int`,
+the `<=` comparison operands are both `int`, and the function's return type
+matches its declaration.
+
+**After IR generation** — LLVM IR:
+```llvm
+define i32 @fibonacci(i32 %n) {
+entry:
+  %cmp = icmp sle i32 %n, 1
+  br i1 %cmp, label %then, label %else
+
+then:
+  ret i32 %n
+
+else:
+  %sub1 = sub i32 %n, 1
+  %call1 = call i32 @fibonacci(i32 %sub1)
+  %sub2 = sub i32 %n, 2
+  %call2 = call i32 @fibonacci(i32 %sub2)
+  %add = add i32 %call1, %call2
+  ret i32 %add
+}
+```
+
+**After LLVM backend** — a native binary that runs directly on the CPU.
+
+---
+
+## Repo Structure
+
+```
+minic-compiler/
+├── README.md
+├── include/
+│   ├── lexer.h
+│   ├── token.h
+│   ├── parser.h
+│   ├── ast.h
+│   ├── sema.h               ← semantic analyzer
+│   ├── cfg.h                ← control-flow graph
+│   ├── analyzer.h           ← static analysis passes
+│   └── codegen.h
+├── src/
+│   ├── lexer.cpp
+│   ├── parser.cpp
+│   ├── sema.cpp
+│   ├── cfg.cpp              ← builds a CFG per function from the AST
+│   ├── analyzer.cpp         ← dataflow passes (reaching defs, liveness)
+│   ├── codegen.cpp
+│   └── main.cpp             ← CLI: invoke stages, flags for IR dump
+├── tests/
+│   ├── lexer_test.cpp
+│   ├── parser_test.cpp
+│   ├── sema_test.cpp        ← error case tests
+│   ├── analyzer_test.cpp    ← warning case tests (one per check)
+│   └── codegen_test.cpp     ← compare output against GCC baseline
+├── examples/
+│   ├── fibonacci.mc
+│   ├── sum_of_squares.mc
+│   ├── fizzbuzz.mc
+│   ├── gcd.mc
+│   └── warnings/            ← programs that intentionally trigger each warning
+│       ├── uninitialized.mc
+│       ├── unreachable.mc
+│       ├── unused_var.mc
+│       └── missing_return.mc
+└── docs/
+    ├── language_spec.md     ← BNF grammar + type rules
+    ├── ir_walkthrough.md    ← annotated IR for each example program
+    └── analysis_design.md   ← CFG construction + dataflow algorithms
+```
+
+---
+
+## Build & Run
+
+**Dependencies:** LLVM 17+, CMake 3.20+, a C++17 compiler.
+
+```bash
+# macOS
+brew install llvm cmake
+
+# Ubuntu
+sudo apt install llvm cmake
+```
+
+### Configure & build
+
+Homebrew LLVM is installed locally at `/opt/homebrew/opt/llvm`. If
+`llvm-config` is not on PATH, `scripts/configure.sh` still uses the
+Homebrew path automatically.
+
+```bash
+./scripts/configure.sh
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Manual configure command:
+
+```bash
+cmake -S . -B build -G Ninja -DLLVM_DIR="$(/opt/homebrew/opt/llvm/bin/llvm-config --cmakedir)"
+```
+
+### CLI usage
+
+```bash
+# Dump the token stream (lexer output)
+./build/minic examples/fibonacci.mc --emit-tokens
+
+# Dump the AST (parser output)
+./minic examples/fibonacci.mc --emit-ast
+
+# Run only the static analyzer and print warnings (no compilation)
+./minic examples/gcd.mc --analyze
+
+# Dump the control-flow graph (CFG) in Graphviz DOT format
+./minic examples/gcd.mc --emit-cfg | dot -Tpng -o cfg.png
+
+# Compile with static analysis warnings shown (default), then produce a binary
+./minic examples/gcd.mc -o gcd
+
+# Suppress static analysis warnings
+./minic examples/gcd.mc --no-warnings -o gcd
+
+# Dump LLVM IR (before LLVM optimization)
+./minic examples/fibonacci.mc --emit-ir
+
+# Compile with LLVM optimization enabled
+./minic examples/fibonacci.mc -O2 -o fibonacci_opt
+
+# Compare output against GCC for correctness
+gcc examples/fibonacci.mc -o fibonacci_gcc
+diff <(./fibonacci) <(./fibonacci_gcc)
+```
+
+---
+
+## Error Messages
+
+A compiler is only as good as its error messages. MiniC reports errors with
+the source line number and a clear description:
+
+```
+fibonacci.mc:3:12: error: use of undeclared variable 'nn'
+    if (nn <= 1) {
+        ^~
+fibonacci.mc:8:5: error: return type mismatch — expected 'int', got 'float'
+    return 1.5;
+    ^~~~~~
+fibonacci.mc:12:20: error: wrong number of arguments to 'fibonacci' —
+                    expected 1, got 2
+    return fibonacci(n - 1, n - 2) + fibonacci(n - 2);
+           ^~~~~~~~~~
+```
+
+---
+
+## Static Analysis
+
+Beyond type checking, MiniC includes a dataflow-based static analyzer that
+detects common bug patterns at compile time without running the program.
+This is the same class of analysis that powers clang's static analyzer,
+cppcheck, and the verification passes inside commercial EDA tools — and it
+is built on the same theoretical foundation: control-flow graphs and
+dataflow analysis.
+
+The analyzer reports warnings rather than blocking compilation, matching the
+behavior of real-world linters. Each check is implemented as a separate pass
+over a per-function control-flow graph (CFG), so the checks are independent
+and easy to explain one at a time.
+
+### Checks Implemented
+
+**Uninitialized variable read**
+The most valuable check. Using *reaching definitions* analysis over the CFG,
+the analyzer determines whether every path to a variable's use passes through
+an assignment first. If any path reaches a read without a preceding write,
+it reports a warning.
+
+```
+gcd.mc:4:16: warning: variable 'r' may be used uninitialized
+    int q = a / r;
+               ^
+```
+
+**Unreachable (dead) code**
+Performs a reachability traversal of the CFG starting from the function entry
+block. Any basic block not reached — for example, statements after an
+unconditional `return`, `break`, or `continue` — is reported as dead code.
+
+```
+example.mc:7:5: warning: unreachable code after 'return'
+    return x;
+    int y = 10;   // <-- never executes
+    ^
+```
+
+**Unused variable**
+Using *liveness* analysis, the analyzer detects local variables that are
+declared (and possibly assigned) but whose value is never read on any path.
+This often signals a typo or leftover code.
+
+```
+example.mc:3:9: warning: variable 'temp' is declared but never used
+    int temp = compute();
+        ^~~~
+```
+
+**Unused function**
+A whole-program reachability check over the call graph, starting from `main`.
+Functions never called from any reachable function are flagged. (Recursive
+functions called only by themselves are correctly flagged as unused.)
+
+```
+example.mc:1:5: warning: function 'helper' is defined but never called
+    int helper(int x) {
+        ^~~~~~
+```
+
+**Missing return on a non-void path**
+For any function with a non-`void` return type, the analyzer walks every path
+from entry to exit through the CFG. If any path reaches the function's exit
+without hitting a `return` statement, it warns — this catches a class of
+undefined behavior that the type checker alone cannot see.
+
+```
+example.mc:6:1: warning: control may reach end of non-void function 'max'
+                without returning a value
+}
+^
+```
+
+**Constant-divisor division by zero**
+A lightweight constant-propagation check: when the divisor of a `/` operation
+is a literal `0` or a variable provably equal to `0` on all reaching paths,
+the analyzer warns. This catches a guaranteed runtime crash at compile time.
+
+```
+example.mc:5:18: warning: division by zero
+    int bad = total / 0;
+                    ^
+```
+
+---
+
+For the phase-by-phase build plan, timeline, and further reading, see
+[docs/ROADMAP.md](docs/ROADMAP.md).
