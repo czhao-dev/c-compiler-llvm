@@ -50,3 +50,8 @@ add_executable(parser_test tests/parser_test.cpp)
 target_link_libraries(parser_test PRIVATE minic_core)
 target_compile_definitions(parser_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
 add_test(NAME parser_test COMMAND parser_test)
+
+add_executable(sema_test tests/sema_test.cpp)
+target_link_libraries(sema_test PRIVATE minic_core)
+target_compile_definitions(sema_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
+add_test(NAME sema_test COMMAND sema_test)

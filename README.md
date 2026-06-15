@@ -9,11 +9,16 @@
 
 ## Status
 
-The lexer, AST, and recursive-descent parser are implemented and tested,
-along with the `--emit-tokens` and `--emit-ast` CLI flags. The semantic
-analyzer, static analyzer, and LLVM IR generator are stubbed so the project
-builds cleanly while each phase is added. See [docs/ROADMAP.md](docs/ROADMAP.md)
-for the phase-by-phase build plan and timeline.
+The lexer, AST, recursive-descent parser, and semantic analyzer are
+implemented and tested, along with the `--emit-tokens` and `--emit-ast` CLI
+flags. The semantic analyzer builds a scoped symbol table, checks that every
+variable and function is declared before use, and type-checks expressions,
+assignments, return statements, call arguments, and loop control statements
+(`break`/`continue`). Running `minic <file.mc>` with no flags reports
+diagnostics and exits non-zero if any are errors. The static analyzer and
+LLVM IR generator are stubbed so the project builds cleanly while each phase
+is added. See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build
+plan and timeline.
 
 ---
 

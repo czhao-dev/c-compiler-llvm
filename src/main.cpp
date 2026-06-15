@@ -36,6 +36,20 @@ void printUsage(std::ostream &out) {
     out << "usage: minic <source.mc> [--emit-tokens] [--emit-ast] [--emit-ir] [-o output]\n";
 }
 
+// Runs the semantic analyzer and prints its diagnostics to stderr. Returns 1
+// if any diagnostic is an error, 0 otherwise.
+int runSemanticAnalysis(const minic::ProgramNode &program) {
+    minic::SemanticAnalyzer analyzer;
+    const auto diagnostics = analyzer.analyze(program);
+
+    bool hasErrors = false;
+    for (const auto &diag : diagnostics) {
+        std::cerr << diag.toString() << '\n';
+        hasErrors = hasErrors || diag.severity == minic::DiagnosticSeverity::Error;
+    }
+    return hasErrors ? 1 : 0;
+}
+
 Options parseArgs(int argc, char **argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -108,8 +122,9 @@ int main(int argc, char **argv) {
             minic::Lexer lexer(source, options.inputPath);
             minic::Parser parser(lexer.tokenize());
             const minic::ProgramNode program = parser.parseProgram();
+            const int semaStatus = runSemanticAnalysis(program);
             program.print(std::cout);
-            return 0;
+            return semaStatus;
         }
 
         if (options.emitIr) {
@@ -118,8 +133,16 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        std::cerr << "no compilation stage selected yet; try --emit-tokens\n";
-        return 1;
+        {
+            minic::Lexer lexer(source, options.inputPath);
+            minic::Parser parser(lexer.tokenize());
+            const minic::ProgramNode program = parser.parseProgram();
+            const int semaStatus = runSemanticAnalysis(program);
+            if (semaStatus == 0) {
+                std::cout << "no semantic errors found\n";
+            }
+            return semaStatus;
+        }
     } catch (const std::exception &ex) {
         std::cerr << ex.what() << '\n';
         return 1;

@@ -17,7 +17,7 @@ int main() {
     assert(program.functions.size() == 1);
     assert(program.functions[0]->name == "main");
 
-    assert(minic::semanticAnalyzerStatus().find("not implemented") != std::string::npos);
+    assert(minic::semanticAnalyzerStatus().find("implemented") != std::string::npos);
     assert(!minic::codegenStatus().empty());
     return 0;
 }

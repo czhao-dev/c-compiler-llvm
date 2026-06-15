@@ -19,6 +19,7 @@ std::string typeName(Type type) {
     case Type::Float: return "float";
     case Type::Char: return "char";
     case Type::Void: return "void";
+    case Type::String: return "string";
     }
     return "<unknown type>";
 }

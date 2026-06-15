@@ -14,6 +14,10 @@ enum class Type {
     Float,
     Char,
     Void,
+    // Pseudo-type assigned to string literals by the semantic analyzer.
+    // MiniC has no first-class string type; string literals are only valid
+    // as printf arguments.
+    String,
 };
 
 std::string typeName(Type type);
