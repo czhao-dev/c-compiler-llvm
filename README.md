@@ -9,16 +9,23 @@
 
 ## Status
 
-The lexer, AST, recursive-descent parser, and semantic analyzer are
-implemented and tested, along with the `--emit-tokens` and `--emit-ast` CLI
-flags. The semantic analyzer builds a scoped symbol table, checks that every
-variable and function is declared before use, and type-checks expressions,
+The lexer, AST, recursive-descent parser, semantic analyzer, and static
+analyzer are implemented and tested, along with the `--emit-tokens`,
+`--emit-ast`, `--emit-cfg`, `--analyze`, and `--no-warnings` CLI flags. The
+semantic analyzer builds a scoped symbol table, checks that every variable
+and function is declared before use, and type-checks expressions,
 assignments, return statements, call arguments, and loop control statements
-(`break`/`continue`). Running `minic <file.mc>` with no flags reports
-diagnostics and exits non-zero if any are errors. The static analyzer and
-LLVM IR generator are stubbed so the project builds cleanly while each phase
-is added. See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build
-plan and timeline.
+(`break`/`continue`). The static analyzer builds a per-function control-flow
+graph and runs reaching-definitions, liveness, reachability, call-graph
+reachability, and constant-propagation analyses over it to report
+uninitialized reads, unreachable code, unused variables/functions, missing
+returns, and constant-divisor division by zero — see
+[docs/analysis_design.md](docs/analysis_design.md) for the dataflow
+formulations. Running `minic <file.mc>` with no flags reports diagnostics
+from both analyzers and exits non-zero if any are errors. The LLVM IR
+generator is stubbed so the project builds cleanly while that phase is added.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and
+timeline.
 
 ---
 
@@ -272,7 +279,9 @@ minic-compiler/
 │       ├── uninitialized.mc
 │       ├── unreachable.mc
 │       ├── unused_var.mc
-│       └── missing_return.mc
+│       ├── missing_return.mc
+│       ├── unused_function.mc
+│       └── divide_by_zero.mc
 └── docs/
     ├── language_spec.md     ← BNF grammar + type rules
     ├── ir_walkthrough.md    ← annotated IR for each example program
