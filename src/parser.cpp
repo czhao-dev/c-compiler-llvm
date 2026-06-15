@@ -24,6 +24,29 @@ char decodeCharLiteral(const std::string &lexeme) {
     }
 }
 
+std::string decodeStringLiteral(const std::string &lexeme) {
+    std::string decoded;
+    for (std::size_t i = 0; i < lexeme.size(); ++i) {
+        if (lexeme[i] != '\\' || i + 1 >= lexeme.size()) {
+            decoded.push_back(lexeme[i]);
+            continue;
+        }
+
+        const char escape = lexeme[++i];
+        switch (escape) {
+        case 'n': decoded.push_back('\n'); break;
+        case 't': decoded.push_back('\t'); break;
+        case 'r': decoded.push_back('\r'); break;
+        case '0': decoded.push_back('\0'); break;
+        case '\\': decoded.push_back('\\'); break;
+        case '\'': decoded.push_back('\''); break;
+        case '"': decoded.push_back('"'); break;
+        default: decoded.push_back(escape); break;
+        }
+    }
+    return decoded;
+}
+
 } // namespace
 
 Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {
@@ -427,7 +450,7 @@ ExprPtr Parser::parsePrimary() {
         return std::make_unique<CharLitExprNode>(tok.location, decodeCharLiteral(tok.lexeme));
     case TokenType::StringLiteral:
         advance();
-        return std::make_unique<StringLitExprNode>(tok.location, tok.lexeme);
+        return std::make_unique<StringLitExprNode>(tok.location, decodeStringLiteral(tok.lexeme));
     case TokenType::Identifier: {
         advance();
         if (check(TokenType::LeftParen)) {

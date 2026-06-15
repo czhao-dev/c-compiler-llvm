@@ -175,9 +175,15 @@ int main(int argc, char **argv) {
         }
 
         if (options.emitIr) {
-            std::cerr << minic::codegenStatus() << '\n';
-            std::cerr << "IR emission will be added after the semantic analysis phase.\n";
-            return 1;
+            minic::Lexer lexer(source, options.inputPath);
+            minic::Parser parser(lexer.tokenize());
+            const minic::ProgramNode program = parser.parseProgram();
+            const int semaStatus = runSemanticAnalysis(program);
+            if (semaStatus != 0) {
+                return semaStatus;
+            }
+            std::cout << minic::emitLLVMIR(program, options.inputPath);
+            return 0;
         }
 
         {
@@ -195,7 +201,8 @@ int main(int argc, char **argv) {
 
             if (semaStatus == 0) {
                 runStaticAnalysis(program, options.noWarnings);
-                std::cout << "no semantic errors found\n";
+                minic::compileToNative(program, options.outputPath, options.inputPath);
+                std::cout << "wrote " << options.outputPath << '\n';
             }
             return semaStatus;
         }
