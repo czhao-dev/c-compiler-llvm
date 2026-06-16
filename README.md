@@ -9,23 +9,26 @@
 
 ## Status
 
-The lexer, AST, recursive-descent parser, semantic analyzer, and static
-analyzer are implemented and tested, along with the `--emit-tokens`,
-`--emit-ast`, `--emit-cfg`, `--analyze`, and `--no-warnings` CLI flags. The
-semantic analyzer builds a scoped symbol table, checks that every variable
-and function is declared before use, and type-checks expressions,
+All compiler phases are implemented and tested. The lexer, parser, semantic
+analyzer, static analyzer, and LLVM IR code generator are complete.
+`minic <file.mc>` compiles to a native binary via LLVM; `minic <file.mc> -O2`
+runs LLVM's full optimization pipeline before handing off to the backend.
+
+**CLI flags available:** `--emit-tokens`, `--emit-ast`, `--emit-cfg`,
+`--emit-ir`, `--analyze`, `--no-warnings`, `-O0`/`-O1`/`-O2`/`-O3`, `-o`.
+
+The semantic analyzer builds a scoped symbol table, checks that every
+variable and function is declared before use, and type-checks expressions,
 assignments, return statements, call arguments, and loop control statements
 (`break`/`continue`). The static analyzer builds a per-function control-flow
 graph and runs reaching-definitions, liveness, reachability, call-graph
-reachability, and constant-propagation analyses over it to report
-uninitialized reads, unreachable code, unused variables/functions, missing
-returns, and constant-divisor division by zero — see
+reachability, and constant-propagation analyses — see
 [docs/analysis_design.md](docs/analysis_design.md) for the dataflow
-formulations. Running `minic <file.mc>` with no flags reports diagnostics
-from both analyzers and exits non-zero if any are errors. The LLVM IR
-generator is stubbed so the project builds cleanly while that phase is added.
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and
-timeline.
+formulations. The LLVM code generator walks the typed AST, emits IR using
+`IRBuilder`, and invokes `clang` to produce a native binary. Optimization
+applies LLVM's new pass manager pipeline (`PassBuilder`) at the requested
+level before emitting. See [docs/ROADMAP.md](docs/ROADMAP.md) for the
+phase-by-phase build plan.
 
 ---
 
@@ -341,15 +344,21 @@ cmake -S . -B build -G Ninja -DLLVM_DIR="$(/opt/homebrew/opt/llvm/bin/llvm-confi
 # Suppress static analysis warnings
 ./minic examples/gcd.mc --no-warnings -o gcd
 
-# Dump LLVM IR (before LLVM optimization)
+# Dump LLVM IR (no optimization)
 ./minic examples/fibonacci.mc --emit-ir
 
-# Compile with LLVM optimization enabled
-./minic examples/fibonacci.mc -O2 -o fibonacci_opt
+# Dump LLVM IR after the -O2 pass pipeline
+./minic examples/fibonacci.mc -O2 --emit-ir
+
+# Compile without optimization (default)
+./minic examples/fibonacci.mc -o fibonacci_o0
+
+# Compile with LLVM -O2 optimization pipeline
+./minic examples/fibonacci.mc -O2 -o fibonacci_o2
 
 # Compare output against GCC for correctness
 gcc examples/fibonacci.mc -o fibonacci_gcc
-diff <(./fibonacci) <(./fibonacci_gcc)
+diff <(./fibonacci_o0) <(./fibonacci_gcc)
 ```
 
 ---
@@ -459,3 +468,31 @@ example.mc:5:18: warning: division by zero
     int bad = total / 0;
                     ^
 ```
+
+---
+
+## Optimization
+
+Passing `-O1`, `-O2`, or `-O3` runs LLVM's new-pass-manager pipeline
+(`PassBuilder::buildPerModuleDefaultPipeline`) over the generated IR before
+handing it to the backend. The same optimized IR is shown by `--emit-ir`.
+
+Key transformations applied at `-O2` to `fibonacci.mc`:
+
+| Pass | Effect |
+|---|---|
+| `mem2reg` | Eliminates all `alloca`/`store`/`load` pairs; locals become SSA registers |
+| `instcombine` | Folds `zext i1 → i32; icmp ne, 0` into a single comparison |
+| `simplifycfg` | Merges the two `return` blocks into one with a PHI node |
+| `tailcallelim` | Converts the `fibonacci(n-2)` branch into a loop with an accumulator |
+| `loop-unroll` | Unrolls `main`'s fixed-count while loop into 10 straight-line calls |
+
+**Benchmark — `fibonacci(40)` on Apple M-series:**
+
+| Flag | Runtime |
+|---|---|
+| `-O0` | 0.39 s |
+| `-O2` | 0.28 s (**1.4× faster**) |
+
+See [docs/ir_walkthrough.md](docs/ir_walkthrough.md) for annotated before/after
+IR listings explaining each transformation.

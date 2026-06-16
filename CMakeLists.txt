@@ -28,7 +28,7 @@ if(MINIC_ENABLE_LLVM)
         target_include_directories(minic_core SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
         separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
         target_compile_definitions(minic_core PUBLIC ${LLVM_DEFINITIONS_LIST})
-        llvm_map_components_to_libnames(LLVM_LIBS core support irreader)
+        llvm_map_components_to_libnames(LLVM_LIBS core support irreader passes)
         target_link_libraries(minic_core PUBLIC ${LLVM_LIBS})
     else()
         message(STATUS "LLVM not found. Lexer/parser setup will still build.")
@@ -62,3 +62,38 @@ add_executable(analyzer_test tests/analyzer_test.cpp)
 target_link_libraries(analyzer_test PRIVATE minic_core)
 target_compile_definitions(analyzer_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
 add_test(NAME analyzer_test COMMAND analyzer_test)
+
+if(MINIC_ENABLE_LLVM AND LLVM_FOUND)
+    add_executable(codegen_test tests/codegen_test.cpp)
+    target_link_libraries(codegen_test PRIVATE minic_core)
+    target_compile_definitions(codegen_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
+    add_test(NAME codegen_test COMMAND codegen_test)
+
+    find_program(CLANG_EXECUTABLE clang)
+    if(CLANG_EXECUTABLE)
+        set(_example_outputs)
+        foreach(prog fibonacci fizzbuzz gcd sum_of_squares)
+            add_custom_command(
+                OUTPUT ${CMAKE_BINARY_DIR}/${prog}_clang
+                COMMAND ${CLANG_EXECUTABLE} -x c -include stdio.h
+                        ${CMAKE_SOURCE_DIR}/examples/${prog}.mc
+                        -o ${CMAKE_BINARY_DIR}/${prog}_clang
+                DEPENDS ${CMAKE_SOURCE_DIR}/examples/${prog}.mc
+                VERBATIM
+            )
+            add_custom_command(
+                OUTPUT ${CMAKE_BINARY_DIR}/${prog}_minic
+                COMMAND $<TARGET_FILE:minic>
+                        ${CMAKE_SOURCE_DIR}/examples/${prog}.mc
+                        -o ${CMAKE_BINARY_DIR}/${prog}_minic
+                DEPENDS minic ${CMAKE_SOURCE_DIR}/examples/${prog}.mc
+                VERBATIM
+            )
+            list(APPEND _example_outputs
+                ${CMAKE_BINARY_DIR}/${prog}_clang
+                ${CMAKE_BINARY_DIR}/${prog}_minic
+            )
+        endforeach()
+        add_custom_target(examples ALL DEPENDS ${_example_outputs})
+    endif()
+endif()

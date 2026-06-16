@@ -25,6 +25,7 @@ struct Options {
     bool analyzeOnly = false;
     bool noWarnings = false;
     bool showVersion = false;
+    int optLevel = 0;
 };
 
 std::string readFile(const std::string &path) {
@@ -39,7 +40,7 @@ std::string readFile(const std::string &path) {
 
 void printUsage(std::ostream &out) {
     out << "usage: minic <source.mc> [--emit-tokens] [--emit-ast] [--emit-cfg] [--emit-ir]\n"
-        << "                         [--analyze] [--no-warnings] [-o output]\n";
+        << "                         [--analyze] [--no-warnings] [-O0|-O1|-O2|-O3] [-o output]\n";
 }
 
 // Runs the semantic analyzer and prints its diagnostics to stderr. Returns 1
@@ -103,6 +104,10 @@ Options parseArgs(int argc, char **argv) {
         }
         if (arg == "--no-warnings") {
             options.noWarnings = true;
+            continue;
+        }
+        if (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3") {
+            options.optLevel = arg[2] - '0';
             continue;
         }
         if (arg == "-o") {
@@ -182,7 +187,7 @@ int main(int argc, char **argv) {
             if (semaStatus != 0) {
                 return semaStatus;
             }
-            std::cout << minic::emitLLVMIR(program, options.inputPath);
+            std::cout << minic::emitLLVMIR(program, options.inputPath, options.optLevel);
             return 0;
         }
 
@@ -201,7 +206,7 @@ int main(int argc, char **argv) {
 
             if (semaStatus == 0) {
                 runStaticAnalysis(program, options.noWarnings);
-                minic::compileToNative(program, options.outputPath, options.inputPath);
+                minic::compileToNative(program, options.outputPath, options.inputPath, options.optLevel);
                 std::cout << "wrote " << options.outputPath << '\n';
             }
             return semaStatus;

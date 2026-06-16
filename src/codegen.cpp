@@ -23,6 +23,8 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Host.h>
 #endif
@@ -100,9 +102,9 @@ struct TypedValue {
 
 class CodeGenerator {
 public:
-    CodeGenerator(const ProgramNode &program, std::string moduleName)
+    CodeGenerator(const ProgramNode &program, std::string moduleName, int optLevel)
         : program_(program), context_(), module_(std::make_unique<llvm::Module>(moduleName, context_)),
-          builder_(context_) {
+          builder_(context_), optLevel_(optLevel) {
         module_->setTargetTriple(llvm::Triple(llvm::sys::getDefaultTargetTriple()));
     }
 
@@ -119,6 +121,10 @@ public:
         llvm::raw_string_ostream errorStream(error);
         if (llvm::verifyModule(*module_, &errorStream)) {
             throw std::runtime_error("generated LLVM IR is invalid:\n" + errorStream.str());
+        }
+
+        if (optLevel_ > 0) {
+            runOptimizationPasses();
         }
 
         std::string ir;
@@ -329,19 +335,25 @@ private:
 
         builder_.SetInsertPoint(thenBlock);
         emitBlock(*stmt.thenBlock);
-        if (!currentBlockTerminated()) {
+        bool thenTerminated = currentBlockTerminated();
+        if (!thenTerminated) {
             builder_.CreateBr(mergeBlock);
         }
 
+        bool elseTerminated = false;
         if (elseBlock) {
             builder_.SetInsertPoint(elseBlock);
             emitBlock(*stmt.elseBlock);
-            if (!currentBlockTerminated()) {
+            elseTerminated = currentBlockTerminated();
+            if (!elseTerminated) {
                 builder_.CreateBr(mergeBlock);
             }
         }
 
         builder_.SetInsertPoint(mergeBlock);
+        if (stmt.elseBlock && thenTerminated && elseTerminated) {
+            builder_.CreateUnreachable();
+        }
     }
 
     void emitWhile(const WhileStmtNode &stmt) {
@@ -496,14 +508,47 @@ private:
 
     TypedValue emitBinary(const BinOpExprNode &expr) {
         if (isLogical(expr.op)) {
-            TypedValue lhs = emitExpr(*expr.lhs);
-            TypedValue rhs = emitExpr(*expr.rhs);
-            llvm::Value *left = toBool(lhs);
-            llvm::Value *right = toBool(rhs);
-            llvm::Value *result = expr.op == BinaryOp::And
-                                      ? builder_.CreateAnd(left, right, "andtmp")
-                                      : builder_.CreateOr(left, right, "ortmp");
-            return {builder_.CreateZExt(result, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
+            llvm::Function *func = builder_.GetInsertBlock()->getParent();
+
+            if (expr.op == BinaryOp::And) {
+                auto *rhsBlock = llvm::BasicBlock::Create(context_, "and.rhs", func);
+                auto *endBlock = llvm::BasicBlock::Create(context_, "and.end", func);
+
+                TypedValue lhs = emitExpr(*expr.lhs);
+                llvm::BasicBlock *lhsExit = builder_.GetInsertBlock();
+                builder_.CreateCondBr(toBool(lhs), rhsBlock, endBlock);
+
+                builder_.SetInsertPoint(rhsBlock);
+                TypedValue rhs = emitExpr(*expr.rhs);
+                llvm::BasicBlock *rhsExit = builder_.GetInsertBlock();
+                llvm::Value *rhsBool = toBool(rhs);
+                builder_.CreateBr(endBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                llvm::PHINode *phi = builder_.CreatePHI(llvm::Type::getInt1Ty(context_), 2, "andtmp");
+                phi->addIncoming(llvm::ConstantInt::getFalse(context_), lhsExit);
+                phi->addIncoming(rhsBool, rhsExit);
+                return {builder_.CreateZExt(phi, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
+            } else {
+                auto *rhsBlock = llvm::BasicBlock::Create(context_, "or.rhs", func);
+                auto *endBlock = llvm::BasicBlock::Create(context_, "or.end", func);
+
+                TypedValue lhs = emitExpr(*expr.lhs);
+                llvm::BasicBlock *lhsExit = builder_.GetInsertBlock();
+                builder_.CreateCondBr(toBool(lhs), endBlock, rhsBlock);
+
+                builder_.SetInsertPoint(rhsBlock);
+                TypedValue rhs = emitExpr(*expr.rhs);
+                llvm::BasicBlock *rhsExit = builder_.GetInsertBlock();
+                llvm::Value *rhsBool = toBool(rhs);
+                builder_.CreateBr(endBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                llvm::PHINode *phi = builder_.CreatePHI(llvm::Type::getInt1Ty(context_), 2, "ortmp");
+                phi->addIncoming(llvm::ConstantInt::getTrue(context_), lhsExit);
+                phi->addIncoming(rhsBool, rhsExit);
+                return {builder_.CreateZExt(phi, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
+            }
         }
 
         TypedValue lhs = emitExpr(*expr.lhs);
@@ -667,6 +712,30 @@ private:
         return !block || block->getTerminator() != nullptr;
     }
 
+    void runOptimizationPasses() {
+        llvm::PassBuilder pb;
+        llvm::LoopAnalysisManager lam;
+        llvm::FunctionAnalysisManager fam;
+        llvm::CGSCCAnalysisManager cgam;
+        llvm::ModuleAnalysisManager mam;
+
+        pb.registerModuleAnalyses(mam);
+        pb.registerCGSCCAnalyses(cgam);
+        pb.registerFunctionAnalyses(fam);
+        pb.registerLoopAnalyses(lam);
+        pb.crossRegisterProxies(lam, fam, cgam, mam);
+
+        llvm::OptimizationLevel level;
+        switch (optLevel_) {
+        case 1: level = llvm::OptimizationLevel::O1; break;
+        case 2: level = llvm::OptimizationLevel::O2; break;
+        default: level = llvm::OptimizationLevel::O3; break;
+        }
+
+        llvm::ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(level);
+        mpm.run(*module_, mam);
+    }
+
     const ProgramNode &program_;
     llvm::LLVMContext context_;
     std::unique_ptr<llvm::Module> module_;
@@ -676,18 +745,19 @@ private:
     std::vector<llvm::BasicBlock *> breakTargets_;
     std::vector<llvm::BasicBlock *> continueTargets_;
     const FuncDefNode *currentFunctionAst_ = nullptr;
+    int optLevel_ = 0;
 };
 
 } // namespace
 
-std::string emitLLVMIR(const ProgramNode &program, const std::string &moduleName) {
-    CodeGenerator generator(program, moduleName);
+std::string emitLLVMIR(const ProgramNode &program, const std::string &moduleName, int optLevel) {
+    CodeGenerator generator(program, moduleName, optLevel);
     return generator.generate();
 }
 
 void compileToNative(const ProgramNode &program, const std::string &outputPath,
-                     const std::string &moduleName) {
-    const std::string ir = emitLLVMIR(program, moduleName);
+                     const std::string &moduleName, int optLevel) {
+    const std::string ir = emitLLVMIR(program, moduleName, optLevel);
     const std::string tempTemplate =
         (std::filesystem::temp_directory_path() / "minic_codegen_XXXXXX.ll").string();
     std::vector<char> tempBuffer(tempTemplate.begin(), tempTemplate.end());
@@ -707,7 +777,8 @@ void compileToNative(const ProgramNode &program, const std::string &outputPath,
         out << ir;
     }
 
-    const std::string command = "clang -Wno-override-module " + shellQuote(tempPath.string()) +
+    const std::string command = "clang -Wno-override-module -O" + std::to_string(optLevel) +
+                                " " + shellQuote(tempPath.string()) +
                                 " -o " + shellQuote(outputPath);
     const int status = std::system(command.c_str());
     std::filesystem::remove(tempPath);
