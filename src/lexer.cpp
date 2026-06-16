@@ -242,9 +242,23 @@ Token Lexer::lexNumber(int startLine, int startColumn) {
     }
 
     bool isFloat = false;
-    if (peek() == '.' && std::isdigit(static_cast<unsigned char>(peekNext()))) {
+    if (peek() == '.') {
         isFloat = true;
         advance();
+        while (std::isdigit(static_cast<unsigned char>(peek()))) {
+            advance();
+        }
+    }
+
+    if (peek() == 'e' || peek() == 'E') {
+        isFloat = true;
+        advance();
+        if (peek() == '+' || peek() == '-') {
+            advance();
+        }
+        if (!std::isdigit(static_cast<unsigned char>(peek()))) {
+            error(startLine, startColumn, "expected digits after exponent in float literal");
+        }
         while (std::isdigit(static_cast<unsigned char>(peek()))) {
             advance();
         }

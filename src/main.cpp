@@ -167,7 +167,10 @@ int main(int argc, char **argv) {
             minic::Lexer lexer(source, options.inputPath);
             minic::Parser parser(lexer.tokenize());
             const minic::ProgramNode program = parser.parseProgram();
-            runSemanticAnalysis(program);
+            const int semaStatus = runSemanticAnalysis(program);
+            if (semaStatus != 0) {
+                return semaStatus;
+            }
 
             std::cout << "digraph CFG {\n";
             for (const auto &func : program.functions) {

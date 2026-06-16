@@ -179,13 +179,13 @@ void SemanticAnalyzer::checkVarDecl(const VarDeclStmtNode &decl) {
 
 void SemanticAnalyzer::checkAssign(const AssignStmtNode &assign) {
     const Type *targetType = symbols_.lookup(assign.name);
-    const Type valueType = checkExpr(*assign.value);
-
     if (!targetType) {
         error(assign.location, "use of undeclared variable '" + assign.name + "'");
+        checkExpr(*assign.value);
         return;
     }
 
+    const Type valueType = checkExpr(*assign.value);
     checkAssignable(assign.location, *targetType, valueType, "assignment to '" + assign.name + "'");
 }
 
@@ -304,7 +304,7 @@ Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
     }
 
     switch (expr.op) {
-    case UnaryOp::Negate: return operandType;
+    case UnaryOp::Negate: return operandType == Type::Float ? Type::Float : Type::Int;
     case UnaryOp::Not: return Type::Int;
     }
     return Type::Int;

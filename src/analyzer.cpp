@@ -314,12 +314,26 @@ void StaticAnalyzer::checkUnreachable(const CFG &cfg) {
 // ---------------------------------------------------------------------------
 
 void StaticAnalyzer::checkUninitialized(const FuncDefNode &func, const CFG &cfg) {
+    // Count how many times each name is declared across all blocks. Names that
+    // appear in more than one VarDeclStmtNode are shadowing declarations in
+    // nested (or sequential) scopes. Tracking them with a single shared bit
+    // produces both false positives and false negatives, so we exclude them.
+    std::unordered_map<std::string, int> declCount;
+    for (const auto &block : cfg.blocks) {
+        for (const auto *stmt : block.statements) {
+            if (const auto *decl = dynamic_cast<const VarDeclStmtNode *>(stmt)) {
+                ++declCount[decl->name];
+            }
+        }
+    }
+
     std::vector<std::string> localVars;
     std::unordered_map<std::string, std::size_t> varIndex;
     for (const auto &block : cfg.blocks) {
         for (const auto *stmt : block.statements) {
             if (const auto *decl = dynamic_cast<const VarDeclStmtNode *>(stmt)) {
-                if (varIndex.emplace(decl->name, localVars.size()).second) {
+                if (declCount[decl->name] == 1 &&
+                    varIndex.emplace(decl->name, localVars.size()).second) {
                     localVars.push_back(decl->name);
                 }
             }

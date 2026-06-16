@@ -772,9 +772,14 @@ void compileToNative(const ProgramNode &program, const std::string &outputPath,
     {
         std::ofstream out(tempPath);
         if (!out) {
-            throw std::runtime_error("could not create temporary IR file: " + tempPath.string());
+            std::filesystem::remove(tempPath);
+            throw std::runtime_error("could not write temporary IR file: " + tempPath.string());
         }
         out << ir;
+        if (!out) {
+            std::filesystem::remove(tempPath);
+            throw std::runtime_error("could not write temporary IR file: " + tempPath.string());
+        }
     }
 
     const std::string command = "clang -Wno-override-module -O" + std::to_string(optLevel) +
