@@ -221,25 +221,40 @@ carries a resolved type. The analyzer confirms `n` is declared as `int`,
 the `<=` comparison operands are both `int`, and the function's return type
 matches its declaration.
 
-**After IR generation** — LLVM IR:
+**After IR generation** — LLVM IR (`-O0`):
 ```llvm
 define i32 @fibonacci(i32 %n) {
 entry:
-  %cmp = icmp sle i32 %n, 1
-  br i1 %cmp, label %then, label %else
+  ; alloca+store+load is LLVM's canonical pattern for mutable locals before mem2reg.
+  %n1 = alloca i32, align 4
+  store i32 %n, ptr %n1, align 4
+  %n2 = load i32, ptr %n1, align 4
+  %letmp    = icmp sle i32 %n2, 1
+  %cmptoint = zext i1 %letmp to i32
+  %booltmp  = icmp ne i32 %cmptoint, 0
+  br i1 %booltmp, label %if.then, label %if.end
 
-then:
-  ret i32 %n
+if.then:
+  %n3 = load i32, ptr %n1, align 4
+  ret i32 %n3
 
-else:
-  %sub1 = sub i32 %n, 1
-  %call1 = call i32 @fibonacci(i32 %sub1)
-  %sub2 = sub i32 %n, 2
-  %call2 = call i32 @fibonacci(i32 %sub2)
-  %add = add i32 %call1, %call2
-  ret i32 %add
+if.end:
+  %n4      = load i32, ptr %n1, align 4
+  %subtmp  = sub i32 %n4, 1
+  %calltmp = call i32 @fibonacci(i32 %subtmp)
+  %n5      = load i32, ptr %n1, align 4
+  %subtmp6 = sub i32 %n5, 2
+  %calltmp7 = call i32 @fibonacci(i32 %subtmp6)
+  %addtmp  = add i32 %calltmp, %calltmp7
+  ret i32 %addtmp
 }
 ```
+
+The `if.then` / `if.end` block names come from the code generator; every
+`if` statement produces exactly two target blocks. At `-O2`, `mem2reg`
+eliminates all the `alloca`/`store`/`load` chains, `instcombine` folds the
+double-comparison into a single `icmp slt`, and the optimizer converts the
+`fibonacci(n-2)` recursion into a loop (see [docs/ir_walkthrough.md](docs/ir_walkthrough.md)).
 
 **After LLVM backend** — a native binary that runs directly on the CPU.
 
