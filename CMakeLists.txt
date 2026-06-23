@@ -13,8 +13,6 @@ add_library(minic_core
     src/ast.cpp
     src/parser.cpp
     src/sema.cpp
-    src/cfg.cpp
-    src/analyzer.cpp
     src/codegen.cpp
 )
 target_include_directories(minic_core PUBLIC include)
@@ -57,11 +55,6 @@ add_executable(sema_test tests/sema_test.cpp)
 target_link_libraries(sema_test PRIVATE minic_core)
 target_compile_definitions(sema_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
 add_test(NAME sema_test COMMAND sema_test)
-
-add_executable(analyzer_test tests/analyzer_test.cpp)
-target_link_libraries(analyzer_test PRIVATE minic_core)
-target_compile_definitions(analyzer_test PRIVATE MINIC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
-add_test(NAME analyzer_test COMMAND analyzer_test)
 
 if(MINIC_ENABLE_LLVM AND LLVM_FOUND)
     add_executable(codegen_test tests/codegen_test.cpp)

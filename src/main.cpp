@@ -1,5 +1,3 @@
-#include "analyzer.h"
-#include "cfg.h"
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
@@ -20,10 +18,7 @@ struct Options {
     std::string outputPath = "a.out";
     bool emitTokens = false;
     bool emitAst = false;
-    bool emitCfg = false;
     bool emitIr = false;
-    bool analyzeOnly = false;
-    bool noWarnings = false;
     bool showVersion = false;
     int optLevel = 0;
 };
@@ -39,8 +34,8 @@ std::string readFile(const std::string &path) {
 }
 
 void printUsage(std::ostream &out) {
-    out << "usage: minic <source.mc> [--emit-tokens] [--emit-ast] [--emit-cfg] [--emit-ir]\n"
-        << "                         [--analyze] [--no-warnings] [-O0|-O1|-O2|-O3] [-o output]\n";
+    out << "usage: minic <source.mc> [--emit-tokens] [--emit-ast] [--emit-ir]\n"
+        << "                         [-O0|-O1|-O2|-O3] [-o output]\n";
 }
 
 // Runs the semantic analyzer and prints its diagnostics to stderr. Returns 1
@@ -55,19 +50,6 @@ int runSemanticAnalysis(const minic::ProgramNode &program) {
         hasErrors = hasErrors || diag.severity == minic::DiagnosticSeverity::Error;
     }
     return hasErrors ? 1 : 0;
-}
-
-// Runs the static analyzer and prints its warnings to stderr, unless
-// suppressed by --no-warnings. The static analyzer never fails the build:
-// it reports warnings, not errors.
-void runStaticAnalysis(const minic::ProgramNode &program, bool noWarnings) {
-    if (noWarnings) {
-        return;
-    }
-    minic::StaticAnalyzer analyzer;
-    for (const auto &diag : analyzer.analyze(program)) {
-        std::cerr << diag.toString() << '\n';
-    }
 }
 
 Options parseArgs(int argc, char **argv) {
@@ -90,20 +72,8 @@ Options parseArgs(int argc, char **argv) {
             options.emitAst = true;
             continue;
         }
-        if (arg == "--emit-cfg") {
-            options.emitCfg = true;
-            continue;
-        }
         if (arg == "--emit-ir") {
             options.emitIr = true;
-            continue;
-        }
-        if (arg == "--analyze") {
-            options.analyzeOnly = true;
-            continue;
-        }
-        if (arg == "--no-warnings") {
-            options.noWarnings = true;
             continue;
         }
         if (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3") {
@@ -163,25 +133,6 @@ int main(int argc, char **argv) {
             return semaStatus;
         }
 
-        if (options.emitCfg) {
-            minic::Lexer lexer(source, options.inputPath);
-            minic::Parser parser(lexer.tokenize());
-            const minic::ProgramNode program = parser.parseProgram();
-            const int semaStatus = runSemanticAnalysis(program);
-            if (semaStatus != 0) {
-                return semaStatus;
-            }
-
-            std::cout << "digraph CFG {\n";
-            for (const auto &func : program.functions) {
-                minic::CFGBuilder builder;
-                const minic::CFG cfg = builder.build(*func);
-                cfg.printDot(std::cout, func->name);
-            }
-            std::cout << "}\n";
-            return 0;
-        }
-
         if (options.emitIr) {
             minic::Lexer lexer(source, options.inputPath);
             minic::Parser parser(lexer.tokenize());
@@ -200,15 +151,7 @@ int main(int argc, char **argv) {
             const minic::ProgramNode program = parser.parseProgram();
             const int semaStatus = runSemanticAnalysis(program);
 
-            if (options.analyzeOnly) {
-                if (semaStatus == 0) {
-                    runStaticAnalysis(program, options.noWarnings);
-                }
-                return semaStatus;
-            }
-
             if (semaStatus == 0) {
-                runStaticAnalysis(program, options.noWarnings);
                 minic::compileToNative(program, options.outputPath, options.inputPath, options.optLevel);
                 std::cout << "wrote " << options.outputPath << '\n';
             }

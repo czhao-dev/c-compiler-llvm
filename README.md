@@ -6,9 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > A compiler for a statically-typed subset of C — from hand-written source
-> code through a lexer, parser, semantic analyzer, dataflow-based static
-> analyzer, and LLVM IR generator, producing native binaries that run without
-> any runtime dependency.
+> code through a lexer, parser, semantic analyzer, and LLVM IR generator,
+> producing native binaries that run without any runtime dependency.
 
 ---
 
@@ -17,10 +16,8 @@
 MiniC takes C source files written in a well-defined subset of the language
 and compiles them to native machine code through a complete pipeline: a
 hand-written lexer, a recursive-descent parser, a semantic analyzer that
-catches type errors and undeclared variables, a dataflow-based static
-analyzer that detects bug-prone patterns (uninitialized reads, unreachable
-code, unused variables), and an LLVM IR code generator that produces
-binaries via the LLVM backend.
+catches type errors and undeclared variables, and an LLVM IR code generator
+that produces binaries via the LLVM backend.
 
 Because the source language is a real subset of C — not an invented DSL —
 the project needs no explanation of what the language does or why it
@@ -29,20 +26,18 @@ immediately.
 
 The project demonstrates how a compiler works end to end: how source text
 becomes tokens, how tokens become a structured tree, how that tree is
-type-checked and analyzed for bugs, and how it becomes LLVM IR that the
-backend turns into a runnable binary. The static analyzer in particular
-demonstrates dataflow analysis — control-flow graph construction, reaching
-definitions, and liveness — which is the theoretical core of both compiler
-optimization and verification tooling.
+type-checked, and how it becomes LLVM IR that the backend turns into a
+runnable binary.
 
 **All phases are implemented, tested, and cross-validated against clang.**
 `minic <file.mc>` compiles straight to a native binary; `minic <file.mc> -O2`
 runs LLVM's full optimization pipeline first. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and
+[docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase build plan and the
+language-coverage roadmap, and
 [Testing & Validation](#testing--validation) below for what's actually been verified.
 
-**CLI flags:** `--emit-tokens`, `--emit-ast`, `--emit-cfg`, `--emit-ir`,
-`--analyze`, `--no-warnings`, `-O0`/`-O1`/`-O2`/`-O3`, `-o`.
+**CLI flags:** `--emit-tokens`, `--emit-ast`, `--emit-ir`,
+`-O0`/`-O1`/`-O2`/`-O3`, `-o`.
 
 ---
 
@@ -148,15 +143,6 @@ Source file (.mc)
                            - return type matches function declaration
         │  typed AST
         ▼
-    Static Analyzer        builds a control-flow graph per function and
-                           runs dataflow analyses to report warnings:
-                           - uninitialized variable reads
-                           - unreachable (dead) code
-                           - unused variables and functions
-                           - missing return on a non-void path
-                           - constant-divisor division by zero
-        │  typed AST (+ warnings)
-        ▼
     LLVM IR Generator      walks the typed AST, emits LLVM IR using
                            IRBuilder — one IR instruction per AST node
         │  LLVM IR (.ll)
@@ -167,10 +153,6 @@ Source file (.mc)
         ▼
     Native Binary
 ```
-
-> The static analyzer reports **warnings**, not errors — it does not block
-> compilation. This mirrors how production analyzers (clang-tidy, cppcheck)
-> behave: they surface likely bugs while leaving the decision to the developer.
 
 ---
 
@@ -249,116 +231,26 @@ double-comparison into a single `icmp slt`, and the optimizer converts the
 
 ---
 
-## Static Analysis
-
-Beyond type checking, MiniC includes a dataflow-based static analyzer that
-detects common bug patterns at compile time without running the program.
-This is the same class of analysis that powers clang's static analyzer,
-cppcheck, and the verification passes inside commercial EDA tools — and it
-is built on the same theoretical foundation: control-flow graphs and
-dataflow analysis.
-
-The analyzer reports warnings rather than blocking compilation, matching the
-behavior of real-world linters. Each check is implemented as a separate pass
-over a per-function control-flow graph (CFG), so the checks are independent
-and easy to explain one at a time.
-
-### Checks Implemented
-
-**Uninitialized variable read**
-The most valuable check. Using *reaching definitions* analysis over the CFG,
-the analyzer determines whether every path to a variable's use passes through
-an assignment first. If any path reaches a read without a preceding write,
-it reports a warning.
-
-```
-gcd.mc:4:16: warning: variable 'r' may be used uninitialized
-    int q = a / r;
-               ^
-```
-
-**Unreachable (dead) code**
-Performs a reachability traversal of the CFG starting from the function entry
-block. Any basic block not reached — for example, statements after an
-unconditional `return`, `break`, or `continue` — is reported as dead code.
-
-```
-example.mc:7:5: warning: unreachable code after 'return'
-    return x;
-    int y = 10;   // <-- never executes
-    ^
-```
-
-**Unused variable**
-Using *liveness* analysis, the analyzer detects local variables that are
-declared (and possibly assigned) but whose value is never read on any path.
-This often signals a typo or leftover code.
-
-```
-example.mc:3:9: warning: variable 'temp' is declared but never used
-    int temp = compute();
-        ^~~~
-```
-
-**Unused function**
-A whole-program reachability check over the call graph, starting from `main`.
-Functions never called from any reachable function are flagged. (Recursive
-functions called only by themselves are correctly flagged as unused.)
-
-```
-example.mc:1:5: warning: function 'helper' is defined but never called
-    int helper(int x) {
-        ^~~~~~
-```
-
-**Missing return on a non-void path**
-For any function with a non-`void` return type, the analyzer walks every path
-from entry to exit through the CFG. If any path reaches the function's exit
-without hitting a `return` statement, it warns — this catches a class of
-undefined behavior that the type checker alone cannot see.
-
-```
-example.mc:6:1: warning: control may reach end of non-void function 'max'
-                without returning a value
-}
-^
-```
-
-**Constant-divisor division by zero**
-A lightweight constant-propagation check: when the divisor of a `/` operation
-is a literal `0` or a variable provably equal to `0` on all reaching paths,
-the analyzer warns. This catches a guaranteed runtime crash at compile time.
-
-```
-example.mc:5:18: warning: division by zero
-    int bad = total / 0;
-                    ^
-```
-
----
-
 ## Testing & Validation
 
 Every pipeline stage has its own test executable, built with nothing more
 than `<cassert>` — no external test framework, so the build stays hermetic
-and `ctest` is the only thing a contributor needs to run. All 6 suites pass:
+and `ctest` is the only thing a contributor needs to run. All 5 suites pass:
 
 ```
 $ ctest --test-dir build
     Start 1: lexer_test
-1/6 Test #1: lexer_test .......................   Passed
+1/5 Test #1: lexer_test .......................   Passed
     Start 2: smoke_test
-2/6 Test #2: smoke_test .......................   Passed
+2/5 Test #2: smoke_test .......................   Passed
     Start 3: parser_test
-3/6 Test #3: parser_test ......................   Passed
+3/5 Test #3: parser_test ......................   Passed
     Start 4: sema_test
-4/6 Test #4: sema_test ........................   Passed
-    Start 5: analyzer_test
-5/6 Test #5: analyzer_test ....................   Passed
-    Start 6: codegen_test
-6/6 Test #6: codegen_test .....................   Passed
+4/5 Test #4: sema_test ........................   Passed
+    Start 5: codegen_test
+5/5 Test #5: codegen_test .....................   Passed
 
-100% tests passed, 0 tests failed out of 6
+100% tests passed, 0 tests failed out of 5
 Total Test time (real) =   1.5 sec
 ```
 
@@ -367,7 +259,6 @@ Total Test time (real) =   1.5 sec
 | `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
 | `parser_test` | AST shape for every grammar construct, plus parse-error messages |
 | `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `analyzer_test` | One assertion per static-analysis warning class (uninitialized reads, dead code, unused variables/functions, missing return, divide-by-zero) |
 | `codegen_test` | Compiles and **runs** all four example programs through the full pipeline, asserting on exact stdout |
 | `smoke_test` | End-to-end CLI sanity check |
 
@@ -382,40 +273,20 @@ gcd:       IDENTICAL
 sum_of_squares: IDENTICAL
 ```
 
-**Static analyzer correctness is validated against a curated fixture set.**
-[examples/warnings/](examples/warnings/) contains one program per warning
-class; running `--analyze` against all six confirms each check fires on the
-exact pattern it's designed to catch and stays silent otherwise:
-
-```
-divide_by_zero.mc:6:23: warning: division by zero
-missing_return.mc:5:1:  warning: control may reach the end of non-void function 'max' without returning a value
-uninitialized.mc:6:13:  warning: variable 'x' may be used uninitialized
-unreachable.mc:8:5:     warning: unreachable code
-unused_function.mc:4:1: warning: function 'helper' is defined but never called
-unused_var.mc:9:5:      warning: variable 'temp' is declared but never used
-```
-
 ### Bug hunt and hardening
 
-The static analyzer's dataflow passes are the most algorithmically
-interesting part of this project, so they got the closest scrutiny. A
-targeted correctness review across the lexer, parser, semantic analyzer,
-static analyzer, and code generator turned up — and fixed — six real
-defects:
+A targeted correctness review across the lexer, parser, semantic analyzer,
+and code generator turned up — and fixed — four real defects:
 
 | Bug | Root cause | Fix |
 |---|---|---|
-| False positive/negative on shadowed variables | `checkUninitialized` keyed its reaching-definitions bit-vector by variable **name**; two declarations of `x` in nested scopes silently shared one bit, so initializing the inner `x` could mask an uninitialized outer `x` (or vice versa) | Pre-count declarations per name and exclude any name declared more than once from the bit-vector — a safe over-approximation that trades a rare false negative for zero false positives |
-| `--emit-cfg` always exited 0 | The semantic analyzer's return value was discarded in that code path, unlike `--emit-ast`/`--emit-ir` | Propagate `semaStatus` like the other emit modes do |
 | Double, misordered diagnostics on bad assignments | `checkAssign` evaluated the RHS before checking whether the LHS was even declared, so `x = y;` with both undeclared printed the `y` error before the (more important) `x` error | Check the assignment target first; only evaluate the RHS afterward |
 | Temp `.ll` file leaked on write failure | `compileToNative` only deleted its temp file after a successful `clang` invocation — an `ofstream` open/write failure threw before cleanup ran | Delete the temp file on every throwing path, not just the success path |
 | `1.` and `1e5` failed to lex as floats | The lexer only recognized a `.` followed by a digit, with no exponent handling at all | Accept a bare trailing `.` and `[eE][+-]?[0-9]+` exponents in `lexNumber` |
 | sema/codegen type mismatch on `-charVar` | Sema typed unary negation on `char` as `char`; codegen sign-extended to `int` before negating and returned `int` — the two stages disagreed about the expression's type | Sema now returns `int` for negation on any non-float operand, matching codegen and C's integer-promotion rule |
 
-Each fix was verified by hand-constructed regression cases (e.g. a variable
-shadowed across an `if` body in both initialization orders) before being
-folded back into the full test run above — all 6 suites and all 4
+Each fix was verified by hand-constructed regression cases before being
+folded back into the full test run above — all 5 suites and all 4
 example-vs-clang diffs still pass after the fix.
 
 ---
@@ -459,39 +330,27 @@ minic-compiler/
 │   ├── parser.h
 │   ├── ast.h
 │   ├── sema.h               ← semantic analyzer
-│   ├── cfg.h                ← control-flow graph
-│   ├── analyzer.h           ← static analysis passes
 │   └── codegen.h
 ├── src/
 │   ├── lexer.cpp
 │   ├── parser.cpp
 │   ├── sema.cpp
-│   ├── cfg.cpp              ← builds a CFG per function from the AST
-│   ├── analyzer.cpp         ← dataflow passes (reaching defs, liveness)
 │   ├── codegen.cpp
 │   └── main.cpp             ← CLI: invoke stages, flags for IR dump
 ├── tests/
 │   ├── lexer_test.cpp
 │   ├── parser_test.cpp
 │   ├── sema_test.cpp        ← error case tests
-│   ├── analyzer_test.cpp    ← warning case tests (one per check)
 │   └── codegen_test.cpp     ← compare output against a clang baseline
 ├── examples/
 │   ├── fibonacci.mc
 │   ├── sum_of_squares.mc
 │   ├── fizzbuzz.mc
-│   ├── gcd.mc
-│   └── warnings/            ← programs that intentionally trigger each warning
-│       ├── uninitialized.mc
-│       ├── unreachable.mc
-│       ├── unused_var.mc
-│       ├── missing_return.mc
-│       ├── unused_function.mc
-│       └── divide_by_zero.mc
+│   └── gcd.mc
 └── docs/
+    ├── ROADMAP.md           ← build plan + language-coverage roadmap
     ├── language_spec.md     ← BNF grammar + type rules
-    ├── ir_walkthrough.md    ← annotated IR for each example program
-    └── analysis_design.md   ← CFG construction + dataflow algorithms
+    └── ir_walkthrough.md    ← annotated IR for each example program
 ```
 
 ---
@@ -535,17 +394,8 @@ cmake -S . -B build -G Ninja -DLLVM_DIR="$(/opt/homebrew/opt/llvm/bin/llvm-confi
 # Dump the AST (parser output)
 ./minic examples/fibonacci.mc --emit-ast
 
-# Run only the static analyzer and print warnings (no compilation)
-./minic examples/gcd.mc --analyze
-
-# Dump the control-flow graph (CFG) in Graphviz DOT format
-./minic examples/gcd.mc --emit-cfg | dot -Tpng -o cfg.png
-
-# Compile with static analysis warnings shown (default), then produce a binary
+# Compile to a native binary
 ./minic examples/gcd.mc -o gcd
-
-# Suppress static analysis warnings
-./minic examples/gcd.mc --no-warnings -o gcd
 
 # Dump LLVM IR (no optimization)
 ./minic examples/fibonacci.mc --emit-ir

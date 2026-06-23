@@ -89,8 +89,8 @@ statement.
 **var_decl** — declares a local variable in the current scope. The
 initializer is required for `float` when a value is needed immediately; it
 is optional for all types. A declaration without an initializer leaves the
-variable uninitialized — the static analyzer will warn if it is read before
-being assigned.
+variable uninitialized; reading it before assignment is undefined behavior,
+as in C.
 
 ```c
 int count = 0;
@@ -276,8 +276,7 @@ variable assignment.
 The expression type must be assignable to the enclosing function's declared
 return type. A `void` function may use a bare `return;` or fall off the
 end of its body. A non-`void` function that reaches the end of its body
-without a `return` triggers a static-analyzer warning (missing return on a
-non-void path).
+without a `return` is undefined behavior, as in C.
 
 ### Condition Expressions
 
