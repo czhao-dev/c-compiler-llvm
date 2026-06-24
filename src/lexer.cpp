@@ -64,11 +64,14 @@ std::string tokenTypeName(TokenType type) {
     case TokenType::And: return "TOK_AND";
     case TokenType::Or: return "TOK_OR";
     case TokenType::Not: return "TOK_NOT";
+    case TokenType::Ampersand: return "TOK_AMP";
     case TokenType::Assign: return "TOK_ASSIGN";
     case TokenType::LeftParen: return "TOK_LPAREN";
     case TokenType::RightParen: return "TOK_RPAREN";
     case TokenType::LeftBrace: return "TOK_LBRACE";
     case TokenType::RightBrace: return "TOK_RBRACE";
+    case TokenType::LeftBracket: return "TOK_LBRACKET";
+    case TokenType::RightBracket: return "TOK_RBRACKET";
     case TokenType::Semicolon: return "TOK_SEMI";
     case TokenType::Comma: return "TOK_COMMA";
     case TokenType::EndOfFile: return "TOK_EOF";
@@ -151,7 +154,7 @@ Token Lexer::nextToken() {
         if (match('&')) {
             return makeToken(TokenType::And, "&&", startLine, startColumn);
         }
-        error(startLine, startColumn, "expected '&' after '&'");
+        return makeToken(TokenType::Ampersand, "&", startLine, startColumn);
     case '|':
         if (match('|')) {
             return makeToken(TokenType::Or, "||", startLine, startColumn);
@@ -161,6 +164,8 @@ Token Lexer::nextToken() {
     case ')': return makeToken(TokenType::RightParen, ")", startLine, startColumn);
     case '{': return makeToken(TokenType::LeftBrace, "{", startLine, startColumn);
     case '}': return makeToken(TokenType::RightBrace, "}", startLine, startColumn);
+    case '[': return makeToken(TokenType::LeftBracket, "[", startLine, startColumn);
+    case ']': return makeToken(TokenType::RightBracket, "]", startLine, startColumn);
     case ';': return makeToken(TokenType::Semicolon, ";", startLine, startColumn);
     case ',': return makeToken(TokenType::Comma, ",", startLine, startColumn);
     case '\'': return lexCharLiteral(startLine, startColumn);

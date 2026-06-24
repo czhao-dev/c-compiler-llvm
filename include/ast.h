@@ -9,7 +9,7 @@
 
 namespace minic {
 
-enum class Type {
+enum class TypeKind {
     Int,
     Float,
     Char,
@@ -18,6 +18,55 @@ enum class Type {
     // MiniC has no first-class string type; string literals are only valid
     // as printf arguments.
     String,
+};
+
+// A MiniC type: a base kind, a pointer-indirection depth (0 = not a
+// pointer, 1 = T*, 2 = T**, ...), and an optional fixed array length (0 =
+// not an array). Kept as a small value type rather than a flat enum so
+// pointer and array types compose naturally without a separate "pointee
+// type" side table.
+//
+// `arrayLength > 0` means "array of `arrayLength` elements of type {kind,
+// pointerDepth}". Only one array dimension is supported (no arrays of
+// arrays) and there is no pointer-to-array type — taking the address of an
+// array variable is rejected by sema rather than modeled here.
+class Type {
+public:
+    constexpr Type() : kind_(TypeKind::Int), pointerDepth_(0), arrayLength_(0) {}
+    constexpr explicit Type(TypeKind kind, int pointerDepth = 0, int arrayLength = 0)
+        : kind_(kind), pointerDepth_(pointerDepth), arrayLength_(arrayLength) {}
+
+    constexpr TypeKind kind() const { return kind_; }
+    constexpr int pointerDepth() const { return pointerDepth_; }
+    constexpr bool isPointer() const { return pointerDepth_ > 0; }
+    constexpr Type pointerTo() const { return Type(kind_, pointerDepth_ + 1); }
+    // Caller must check isPointer() first.
+    constexpr Type pointee() const { return Type(kind_, pointerDepth_ - 1); }
+
+    constexpr bool isArray() const { return arrayLength_ > 0; }
+    constexpr int arrayLength() const { return arrayLength_; }
+    // This type with the array dimension stripped (same kind/pointerDepth).
+    constexpr Type elementType() const { return Type(kind_, pointerDepth_, 0); }
+    // The pointer type an array decays to when used as a value.
+    constexpr Type decay() const { return Type(kind_, pointerDepth_ + 1, 0); }
+    // Builds "array of `length`" from this (non-array) type.
+    constexpr Type arrayOf(int length) const { return Type(kind_, pointerDepth_, length); }
+
+    friend constexpr bool operator==(const Type &a, const Type &b) {
+        return a.kind_ == b.kind_ && a.pointerDepth_ == b.pointerDepth_ && a.arrayLength_ == b.arrayLength_;
+    }
+    friend constexpr bool operator!=(const Type &a, const Type &b) { return !(a == b); }
+
+    static const Type Int;
+    static const Type Float;
+    static const Type Char;
+    static const Type Void;
+    static const Type String;
+
+private:
+    TypeKind kind_;
+    int pointerDepth_;
+    int arrayLength_;
 };
 
 std::string typeName(Type type);
@@ -40,6 +89,8 @@ enum class BinaryOp {
 enum class UnaryOp {
     Negate,
     Not,
+    AddressOf,
+    Deref,
 };
 
 std::string binaryOpSymbol(BinaryOp op);
@@ -133,6 +184,15 @@ public:
     ExprPtr rhs;
 };
 
+class IndexExprNode : public ExprNode {
+public:
+    IndexExprNode(SourceLocation location, ExprPtr base, ExprPtr index);
+    void print(std::ostream &out, int indent) const override;
+
+    ExprPtr base;
+    ExprPtr index;
+};
+
 class CallExprNode : public ExprNode {
 public:
     CallExprNode(SourceLocation location, std::string callee, std::vector<ExprPtr> args);
@@ -166,10 +226,11 @@ public:
 
 class AssignStmtNode : public StmtNode {
 public:
-    AssignStmtNode(SourceLocation location, std::string name, ExprPtr value);
+    AssignStmtNode(SourceLocation location, ExprPtr target, ExprPtr value);
     void print(std::ostream &out, int indent) const override;
 
-    std::string name;
+    // An lvalue expression: an IdentExprNode or a UnaryOpExprNode{Deref, ...}.
+    ExprPtr target;
     ExprPtr value;
 };
 

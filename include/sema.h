@@ -75,13 +75,16 @@ private:
     Type checkUnaryOp(const UnaryOpExprNode &expr);
     Type checkBinOp(const BinOpExprNode &expr);
     Type checkCall(const CallExprNode &expr);
+    Type checkIndex(const IndexExprNode &expr);
 
     // Checks that a value of type `value` may be stored into (or returned
     // as, or passed as an argument of) type `target`. Reports an error for
     // incompatible types, or a warning for a narrowing float -> int/char
     // conversion. `context` is prepended to any diagnostic message.
+    // `valueExpr`, if given, lets a literal `0` be accepted as a null
+    // pointer constant when `target` is a pointer type.
     void checkAssignable(const SourceLocation &location, Type target, Type value,
-                          const std::string &context);
+                          const std::string &context, const ExprNode *valueExpr = nullptr);
 
     void error(SourceLocation location, std::string message);
     void warning(SourceLocation location, std::string message);

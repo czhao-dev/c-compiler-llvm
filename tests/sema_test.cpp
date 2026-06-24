@@ -71,7 +71,8 @@ int main() {
     const std::string examplesDir = MINIC_EXAMPLES_DIR;
 
     // Every example program is well-typed: zero diagnostics.
-    for (const std::string &name : {"fibonacci.mc", "gcd.mc", "fizzbuzz.mc", "sum_of_squares.mc"}) {
+    for (const std::string &name : {"fibonacci.mc", "gcd.mc", "fizzbuzz.mc", "sum_of_squares.mc",
+                                     "pointer_swap.mc", "array_sum.mc"}) {
         const auto diags = analyzeFile(examplesDir + "/" + name);
         if (!diags.empty()) {
             for (const auto &diag : diags) {
@@ -223,6 +224,147 @@ int main() {
             "    return 0;\n"
             "}\n");
         assert(diags.empty());
+    }
+
+    // Pointers: address-of, dereference, assignment through a pointer, and
+    // null-pointer-constant compatibility are all well-typed.
+    {
+        const auto diags = analyzeSource(
+            "void swap(int *a, int *b) {\n"
+            "    int temp = *a;\n"
+            "    *a = *b;\n"
+            "    *b = temp;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    int *p = &x;\n"
+            "    int *q = 0;\n"
+            "    swap(&x, p);\n"
+            "    if (p) {\n"
+            "        q = p;\n"
+            "    }\n"
+            "    return *p;\n"
+            "}\n");
+        assert(diags.empty());
+    }
+
+    // Dereferencing a non-pointer type is an error.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int x = 5;\n"
+            "    return *x;\n"
+            "}\n");
+        assert(hasError(diags, "cannot dereference non-pointer type 'int'"));
+    }
+
+    // Taking the address of a non-lvalue is an error.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int *p = &5;\n"
+            "    return *p;\n"
+            "}\n");
+        assert(hasError(diags, "cannot take the address of a non-lvalue expression"));
+    }
+
+    // Assigning between pointers of different pointee types is an error.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    float *p = &x;\n"
+            "    return 0;\n"
+            "}\n");
+        assert(hasError(diags, "cannot convert 'int*' to 'float*'"));
+    }
+
+    // Dereferencing a pointer to an incomplete type (void) is an error.
+    {
+        const auto diags = analyzeSource(
+            "int f(void *p) {\n"
+            "    return *p;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    return 0;\n"
+            "}\n");
+        assert(hasError(diags, "cannot dereference pointer to incomplete type 'void'"));
+    }
+
+    // Arrays: declaration, indexed read/write, address-of an element, and
+    // passing an array to a pointer parameter (array-to-pointer decay) are
+    // all well-typed.
+    {
+        const auto diags = analyzeSource(
+            "int sum(int *arr, int n) {\n"
+            "    int total = 0;\n"
+            "    int i = 0;\n"
+            "    while (i < n) {\n"
+            "        total = total + arr[i];\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    return total;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    int values[5];\n"
+            "    values[0] = 1;\n"
+            "    int *p = &values[0];\n"
+            "    int *q = values;\n"
+            "    return sum(values, 5);\n"
+            "}\n");
+        assert(diags.empty());
+    }
+
+    // Arrays are not assignable as a whole.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int a[3];\n"
+            "    int b[3];\n"
+            "    a = b;\n"
+            "    return 0;\n"
+            "}\n");
+        assert(hasError(diags, "array 'a' is not assignable"));
+    }
+
+    // Taking the address of an array (no pointer-to-array type) is an error.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int a[3];\n"
+            "    int **p = &a;\n"
+            "    return 0;\n"
+            "}\n");
+        assert(hasError(diags, "cannot take the address of array 'a'"));
+    }
+
+    // Indexing a non-array, non-pointer type is an error.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int x = 5;\n"
+            "    return x[0];\n"
+            "}\n");
+        assert(hasError(diags, "subscripted value is not an array or pointer"));
+    }
+
+    // An array declared with a non-positive size is a syntax error, caught
+    // at parse time (a Type with arrayLength 0 is indistinguishable from a
+    // non-array, so this can't be a sema-level check).
+    {
+        bool threw = false;
+        try {
+            minic::Lexer lexer("int main() { int a[0]; return 0; }", "bad.mc");
+            minic::Parser parser(lexer.tokenize());
+            parser.parseProgram();
+        } catch (const std::exception &ex) {
+            threw = true;
+            assert(std::string(ex.what()).find("array size must be a positive integer") != std::string::npos);
+        }
+        assert(threw);
     }
 
     // Redefinition of a function.

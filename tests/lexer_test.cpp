@@ -107,5 +107,43 @@ int main() {
             TokenType::EndOfFile,
         });
 
+    expectTypes(
+        "int arr[5]; arr[0] = 1;",
+        {
+            TokenType::Int,
+            TokenType::Identifier,
+            TokenType::LeftBracket,
+            TokenType::IntLiteral,
+            TokenType::RightBracket,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::LeftBracket,
+            TokenType::IntLiteral,
+            TokenType::RightBracket,
+            TokenType::Assign,
+            TokenType::IntLiteral,
+            TokenType::Semicolon,
+            TokenType::EndOfFile,
+        });
+
+    expectTypes(
+        "int *p = &x; int y = *p;",
+        {
+            TokenType::Int,
+            TokenType::Star,
+            TokenType::Identifier,
+            TokenType::Assign,
+            TokenType::Ampersand,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::Int,
+            TokenType::Identifier,
+            TokenType::Assign,
+            TokenType::Star,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::EndOfFile,
+        });
+
     return 0;
 }

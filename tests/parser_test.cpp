@@ -166,6 +166,83 @@ int main() {
         assert(notExpr != nullptr && notExpr->op == minic::UnaryOp::Not);
     }
 
+    // Pointer declarations, address-of, dereference, and assignment through
+    // a dereferenced pointer.
+    {
+        auto program = parseSource(
+            "void swap(int *a, int *b) {\n"
+            "    int temp = *a;\n"
+            "    *a = *b;\n"
+            "    *b = temp;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    int *p = &x;\n"
+            "    swap(&x, p);\n"
+            "    return *p;\n"
+            "}\n");
+        assert(program.functions.size() == 2);
+
+        const auto &swapParams = program.functions[0]->params;
+        assert(swapParams.size() == 2);
+        assert(swapParams[0].type.isPointer());
+        assert(swapParams[0].type.pointerDepth() == 1);
+
+        const auto &mainBody = program.functions[1]->body->statements;
+        const auto *pDecl = dynamic_cast<minic::VarDeclStmtNode *>(mainBody[1].get());
+        assert(pDecl != nullptr && pDecl->type.isPointer());
+        const auto *addressOf = dynamic_cast<minic::UnaryOpExprNode *>(pDecl->init.get());
+        assert(addressOf != nullptr && addressOf->op == minic::UnaryOp::AddressOf);
+
+        std::ostringstream out;
+        program.print(out);
+        const std::string ast = out.str();
+        assert(ast.find("Param int* a") != std::string::npos);
+        assert(ast.find("UnaryOp &") != std::string::npos);
+        assert(ast.find("UnaryOp *") != std::string::npos);
+
+        const auto &swapBody = program.functions[0]->body->statements;
+        const auto *derefAssign = dynamic_cast<minic::AssignStmtNode *>(swapBody[1].get());
+        assert(derefAssign != nullptr);
+        const auto *derefTarget = dynamic_cast<minic::UnaryOpExprNode *>(derefAssign->target.get());
+        assert(derefTarget != nullptr && derefTarget->op == minic::UnaryOp::Deref);
+    }
+
+    // Array declarations and indexing (read, write, address-of an element).
+    {
+        auto program = parseSource(
+            "int main() {\n"
+            "    int arr[5];\n"
+            "    arr[0] = 1;\n"
+            "    int x = arr[0];\n"
+            "    int *p = &arr[1];\n"
+            "    return x;\n"
+            "}\n");
+        assert(program.functions.size() == 1);
+
+        const auto &body = program.functions[0]->body->statements;
+        const auto *arrDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[0].get());
+        assert(arrDecl != nullptr);
+        assert(arrDecl->type.isArray() && arrDecl->type.arrayLength() == 5);
+
+        const auto *indexAssign = dynamic_cast<minic::AssignStmtNode *>(body[1].get());
+        assert(indexAssign != nullptr);
+        const auto *indexTarget = dynamic_cast<minic::IndexExprNode *>(indexAssign->target.get());
+        assert(indexTarget != nullptr);
+        assert(dynamic_cast<minic::IdentExprNode *>(indexTarget->base.get()) != nullptr);
+
+        const auto *xDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[2].get());
+        assert(xDecl != nullptr);
+        assert(dynamic_cast<minic::IndexExprNode *>(xDecl->init.get()) != nullptr);
+
+        std::ostringstream out;
+        program.print(out);
+        const std::string ast = out.str();
+        assert(ast.find("VarDecl int[5] arr") != std::string::npos);
+        assert(ast.find("Index") != std::string::npos);
+    }
+
     // Syntax errors are reported with file:line:column.
     {
         bool threw = false;

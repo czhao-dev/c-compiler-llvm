@@ -13,15 +13,26 @@ void printIndent(std::ostream &out, int indent) {
 
 } // namespace
 
+const Type Type::Int = Type(TypeKind::Int);
+const Type Type::Float = Type(TypeKind::Float);
+const Type Type::Char = Type(TypeKind::Char);
+const Type Type::Void = Type(TypeKind::Void);
+const Type Type::String = Type(TypeKind::String);
+
 std::string typeName(Type type) {
-    switch (type) {
-    case Type::Int: return "int";
-    case Type::Float: return "float";
-    case Type::Char: return "char";
-    case Type::Void: return "void";
-    case Type::String: return "string";
+    std::string base;
+    switch (type.kind()) {
+    case TypeKind::Int: base = "int"; break;
+    case TypeKind::Float: base = "float"; break;
+    case TypeKind::Char: base = "char"; break;
+    case TypeKind::Void: base = "void"; break;
+    case TypeKind::String: base = "string"; break;
     }
-    return "<unknown type>";
+    std::string result = base + std::string(type.pointerDepth(), '*');
+    if (type.isArray()) {
+        result += '[' + std::to_string(type.arrayLength()) + ']';
+    }
+    return result;
 }
 
 std::string binaryOpSymbol(BinaryOp op) {
@@ -46,6 +57,8 @@ std::string unaryOpSymbol(UnaryOp op) {
     switch (op) {
     case UnaryOp::Negate: return "-";
     case UnaryOp::Not: return "!";
+    case UnaryOp::AddressOf: return "&";
+    case UnaryOp::Deref: return "*";
     }
     return "<unknown op>";
 }
@@ -113,6 +126,16 @@ void BinOpExprNode::print(std::ostream &out, int indent) const {
     rhs->print(out, indent + 1);
 }
 
+IndexExprNode::IndexExprNode(SourceLocation location, ExprPtr base, ExprPtr index)
+    : ExprNode(std::move(location)), base(std::move(base)), index(std::move(index)) {}
+
+void IndexExprNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Index\n";
+    base->print(out, indent + 1);
+    index->print(out, indent + 1);
+}
+
 CallExprNode::CallExprNode(SourceLocation location, std::string callee, std::vector<ExprPtr> args)
     : ExprNode(std::move(location)), callee(std::move(callee)), args(std::move(args)) {}
 
@@ -150,12 +173,13 @@ void VarDeclStmtNode::print(std::ostream &out, int indent) const {
     }
 }
 
-AssignStmtNode::AssignStmtNode(SourceLocation location, std::string name, ExprPtr value)
-    : StmtNode(std::move(location)), name(std::move(name)), value(std::move(value)) {}
+AssignStmtNode::AssignStmtNode(SourceLocation location, ExprPtr target, ExprPtr value)
+    : StmtNode(std::move(location)), target(std::move(target)), value(std::move(value)) {}
 
 void AssignStmtNode::print(std::ostream &out, int indent) const {
     printIndent(out, indent);
-    out << "Assign " << name << '\n';
+    out << "Assign\n";
+    target->print(out, indent + 1);
     value->print(out, indent + 1);
 }
 

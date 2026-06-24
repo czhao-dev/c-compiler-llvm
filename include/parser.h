@@ -58,6 +58,7 @@ private:
     ExprPtr parseAdditive();
     ExprPtr parseMultiplicative();
     ExprPtr parseUnary();
+    ExprPtr parsePostfix();
     ExprPtr parsePrimary();
     ExprPtr parseCallExpr(const Token &calleeTok);
 

@@ -24,9 +24,10 @@ statement    ::= var_decl
                | break_stmt
                | continue_stmt
 
-var_decl     ::= type identifier ("=" expression)? ";"
-assign_stmt  ::= identifier "=" expression ";"
+var_decl     ::= type identifier ("[" int_lit "]")? ("=" expression)? ";"
+assign_stmt  ::= lvalue "=" expression ";"
 call_stmt    ::= identifier "(" args? ")" ";"
+lvalue       ::= identifier | "*" unary | postfix "[" expression "]"
 
 if_stmt      ::= "if" "(" expression ")" block ("else" (if_stmt | block))?
 while_stmt   ::= "while" "(" expression ")" block
@@ -37,7 +38,7 @@ return_stmt  ::= "return" expression? ";"
 break_stmt   ::= "break" ";"
 continue_stmt ::= "continue" ";"
 
-type         ::= "int" | "float" | "char" | "void"
+type         ::= ("int" | "float" | "char" | "void") "*"*
 ```
 
 ### Concrete Examples
@@ -96,15 +97,27 @@ as in C.
 int count = 0;
 float ratio = 3.14;
 char c;            // uninitialized; safe only if assigned before first read
+int values[5];     // a fixed-size array; no initializer syntax for arrays
 ```
 
-**assign_stmt** — assigns a new value to an already-declared variable.
-The variable must be in scope; the right-hand side is evaluated first.
+A declarator may also carry a single `[size]` suffix, making it a
+fixed-size array instead of a scalar. `size` must be a positive integer
+literal (not a general constant expression). Arrays have no initializer
+syntax (no `{1, 2, 3}` literal); fill one with a loop after declaring it.
+
+**assign_stmt** — assigns a new value to an lvalue: either an already-declared
+variable, or a dereferenced pointer (`*p`). The left-hand side is checked
+first, then the right-hand side is evaluated.
 
 ```c
 x = x + 1;
 total = total + fi * fi;
+*p = 5;       // assigns through a pointer
+arr[2] = 5;   // assigns through an array/pointer index
 ```
+
+An array variable itself is **not** assignable as a whole (`arr = other;`
+is an error, matching C) — only individual elements via `arr[i] = ...`.
 
 **call_stmt** — a function call used as a statement; its return value is
 discarded. Used primarily for `printf` and other void-returning functions.
@@ -187,7 +200,8 @@ equality     ::= comparison (("==" | "!=") comparison)*
 comparison   ::= additive (("<" | ">" | "<=" | ">=") additive)*
 additive     ::= multiplicative (("+" | "-") multiplicative)*
 multiplicative ::= unary (("*" | "/") unary)*
-unary        ::= ("!" | "-") unary | primary
+unary        ::= ("!" | "-" | "&" | "*") unary | postfix
+postfix      ::= primary ("[" expression "]")*
 primary      ::= int_lit | float_lit | char_lit | string_lit
                | identifier
                | identifier "(" args? ")"
@@ -198,6 +212,17 @@ args         ::= expression ("," expression)*
 `int <= 1`, `n - 1`, `a && b`, `!done`, and `fibonacci(n - 1)` are all
 examples of expressions covered by this grammar. String literals only
 appear as call arguments (e.g., the format string passed to `printf`).
+
+A leading `&` or `*` in an operand position is the unary address-of or
+dereference operator rather than the binary `&&`/`*` operators — the parser
+disambiguates by position, not by lookahead, exactly as in real C grammars.
+`&x`, `*p`, and `**pp` are all valid unary expressions.
+
+`[` binds tighter than the prefix unary operators, so `*arr[i]` parses as
+`*(arr[i])` and `&arr[i]` as `&(arr[i])`, matching C. Indexing is its own
+grammar production rather than sugar for pointer arithmetic — there is no
+general `p + 1` pointer arithmetic via `+`/`-` yet (those operators still
+require numeric, non-pointer operands).
 
 ---
 
@@ -210,7 +235,69 @@ appear as call arguments (e.g., the format string passed to `printf`).
 | `int`   | 32-bit | signed integer; LLVM `i32` |
 | `float` | 32-bit | IEEE 754 single; LLVM `float` |
 | `char`  | 8-bit  | signed; LLVM `i8` |
-| `void`  | —      | valid only as a function return type |
+| `void`  | —      | valid only as a function return type, or as the pointee of `void*` |
+
+### Pointers
+
+Any base type may be suffixed with one or more `*` to form a pointer type
+(`int*`, `char**`, `void*`, ...). A `Type` is represented internally as a
+base kind plus an indirection depth, so arbitrarily deep pointers compose
+without a separate "pointee type" concept.
+
+- `&expr` — address-of. `expr` must be an lvalue (a variable or a `*ptr`
+  dereference); the result type is `expr`'s type with one more `*`.
+- `*expr` — dereference. `expr` must have pointer type; the result type is
+  `expr`'s type with one fewer `*`. Dereferencing `void*` is an error
+  (`void` is an incomplete type, as in C).
+- A pointer may be compared with `==`/`!=` against another pointer of the
+  *exact same* type, or against the integer literal `0` (a null-pointer
+  constant — `int *p = 0;` and `if (p == 0)` both work this way; there is no
+  `NULL` macro since MiniC has no preprocessor).
+- A pointer may be used directly as an `if`/`while` condition: true when
+  non-null.
+- Pointer arithmetic (`p + 1`) and array indexing are not yet supported —
+  see [docs/ROADMAP.md](ROADMAP.md) for the arrays tier that adds them.
+
+```c
+int x = 5;
+int *p = &x;
+*p = 6;        // x is now 6
+int **pp = &p;
+if (p) { ... }
+```
+
+### Arrays
+
+`Type` carries a single array-length dimension alongside the pointer
+depth (`include/ast.h`'s `Type::arrayLength()`), so `int arr[5]` and
+`int *arr[5]` (an array of 5 pointers) are both representable, but there is
+no multi-dimensional array (`int[5][5]`) and no pointer-to-array type.
+
+- A local variable may be declared with a single `[size]` suffix
+  (`int arr[10];`); `size` must be a positive integer literal.
+- `arr[i]` indexes either an array or a pointer — both lower to the same
+  GEP-based address computation, since an array decays to a pointer to its
+  first element whenever it's used as a value (exactly like C). The index
+  must be numeric; subscripting a `void*` is an error, same as
+  dereferencing one.
+- Because of that decay, passing an array where a pointer parameter is
+  expected (`void f(int *p); ... f(arr);`) just works — `arr` and `&arr[0]`
+  produce the same pointer value.
+- `&arr` (address of the whole array) is rejected, since MiniC has no
+  pointer-to-array type to represent the result; write `&arr[0]` (or just
+  `arr`) for "a pointer to this array's data" instead.
+- An array is not assignable as a whole (`arr = other;` is an error);
+  assign element-by-element with `arr[i] = ...`.
+- There is no array-literal initializer syntax (`int arr[3] = {1, 2, 3};`);
+  fill an array with a loop after declaring it.
+
+```c
+int values[5];
+values[0] = 1;
+int *p = values;        // decays to int*
+int x = p[0];            // same element as values[0]
+int *q = &values[2];     // pointer to the third element
+```
 
 ### Arithmetic Operators (+, -, *, /)
 
@@ -300,8 +387,15 @@ while (n) { ... }   // ok: exits when n == 0
   `IfStmtNode`, `WhileStmtNode`, `ForStmtNode`, `ReturnStmtNode`,
   `BreakStmtNode`, `ContinueStmtNode` — statements
 - `BinOpExprNode`, `UnaryOpExprNode`, `CallExprNode`, `IdentExprNode`,
-  `IntLitExprNode`, `FloatLitExprNode`, `CharLitExprNode`,
-  `StringLitExprNode` — expressions
+  `IndexExprNode`, `IntLitExprNode`, `FloatLitExprNode`, `CharLitExprNode`,
+  `StringLitExprNode` — expressions. `UnaryOpExprNode` covers `&`/`*`
+  (`UnaryOp::AddressOf`/`Deref`) as well as `-`/`!`. `IndexExprNode` holds
+  `base`/`index` sub-expressions for `arr[i]`.
+
+`AssignStmtNode::target` is a general lvalue expression (an `IdentExprNode`,
+a `UnaryOpExprNode{Deref, ...}`, or an `IndexExprNode`), not just a variable
+name, so that `*p = 5;`, `arr[i] = 5;`, and `x = 5;` all share the same AST
+shape.
 
 Every node implements `print(std::ostream&, int indent)`, used by the
 `--emit-ast` CLI flag to dump an indented tree, e.g.:

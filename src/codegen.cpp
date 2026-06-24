@@ -100,6 +100,13 @@ struct TypedValue {
     Type type = Type::Void;
 };
 
+// A storage location: `address` points to a slot holding a value of `type`.
+// Produced for the target of an assignment or the operand of `&`.
+struct LValue {
+    llvm::Value *address = nullptr;
+    Type type = Type::Void;
+};
+
 class CodeGenerator {
 public:
     CodeGenerator(const ProgramNode &program, std::string moduleName, int optLevel)
@@ -147,12 +154,18 @@ private:
     }
 
     llvm::Type *toLLVMType(Type type) {
-        switch (type) {
-        case Type::Int: return llvm::Type::getInt32Ty(context_);
-        case Type::Float: return llvm::Type::getFloatTy(context_);
-        case Type::Char: return llvm::Type::getInt8Ty(context_);
-        case Type::Void: return llvm::Type::getVoidTy(context_);
-        case Type::String: return llvm::PointerType::getUnqual(context_);
+        if (type.isArray()) {
+            return llvm::ArrayType::get(toLLVMType(type.elementType()), type.arrayLength());
+        }
+        if (type.isPointer()) {
+            return llvm::PointerType::getUnqual(context_);
+        }
+        switch (type.kind()) {
+        case TypeKind::Int: return llvm::Type::getInt32Ty(context_);
+        case TypeKind::Float: return llvm::Type::getFloatTy(context_);
+        case TypeKind::Char: return llvm::Type::getInt8Ty(context_);
+        case TypeKind::Void: return llvm::Type::getVoidTy(context_);
+        case TypeKind::String: return llvm::PointerType::getUnqual(context_);
         }
         return llvm::Type::getVoidTy(context_);
     }
@@ -219,12 +232,18 @@ private:
     }
 
     llvm::Constant *defaultValue(Type type) {
-        switch (type) {
-        case Type::Int: return llvm::ConstantInt::get(toLLVMType(type), 0, true);
-        case Type::Float: return llvm::ConstantFP::get(toLLVMType(type), 0.0);
-        case Type::Char: return llvm::ConstantInt::get(toLLVMType(type), 0, true);
-        case Type::Void: return nullptr;
-        case Type::String: return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+        if (type.isArray()) {
+            return llvm::ConstantAggregateZero::get(toLLVMType(type));
+        }
+        if (type.isPointer()) {
+            return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+        }
+        switch (type.kind()) {
+        case TypeKind::Int: return llvm::ConstantInt::get(toLLVMType(type), 0, true);
+        case TypeKind::Float: return llvm::ConstantFP::get(toLLVMType(type), 0.0);
+        case TypeKind::Char: return llvm::ConstantInt::get(toLLVMType(type), 0, true);
+        case TypeKind::Void: return nullptr;
+        case TypeKind::String: return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
         }
         return nullptr;
     }
@@ -308,20 +327,15 @@ private:
         llvm::Value *initial = defaultValue(decl.type);
         if (decl.init) {
             TypedValue emitted = emitExpr(*decl.init);
-            initial = castNumeric(emitted.value, emitted.type, decl.type);
+            initial = castForStore(emitted.value, emitted.type, decl.type);
         }
         builder_.CreateStore(initial, slot);
     }
 
     void emitAssign(const AssignStmtNode &assign) {
-        const Variable *target = lookupVariable(assign.name);
-        if (!target) {
-            throw std::runtime_error(locationString(assign.location) +
-                                     ": assignment to unknown variable '" + assign.name + "'");
-        }
-
+        LValue target = emitLValue(*assign.target);
         TypedValue value = emitExpr(*assign.value);
-        builder_.CreateStore(castNumeric(value.value, value.type, target->type), target->alloca);
+        builder_.CreateStore(castForStore(value.value, value.type, target.type), target.address);
     }
 
     void emitIf(const IfStmtNode &stmt) {
@@ -440,7 +454,7 @@ private:
         }
 
         TypedValue value = emitExpr(*stmt.value);
-        builder_.CreateRet(castNumeric(value.value, value.type, currentFunctionAst_->returnType));
+        builder_.CreateRet(castForStore(value.value, value.type, currentFunctionAst_->returnType));
     }
 
     TypedValue emitExpr(const ExprNode &expr) {
@@ -473,6 +487,10 @@ private:
         if (const auto *call = dynamic_cast<const CallExprNode *>(&expr)) {
             return emitCall(*call);
         }
+        if (dynamic_cast<const IndexExprNode *>(&expr)) {
+            LValue lv = emitLValue(expr);
+            return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "idxload"), lv.type};
+        }
 
         throw std::runtime_error(locationString(expr.location) + ": unsupported expression in codegen");
     }
@@ -483,10 +501,57 @@ private:
             throw std::runtime_error(locationString(expr.location) + ": unknown variable '" + expr.name + "'");
         }
 
+        // An array has no separately-stored pointer value — its "value" as
+        // a pointer is simply its own storage address (array-to-pointer
+        // decay), unlike a real pointer variable, which must be loaded.
+        if (variable->type.isArray()) {
+            return {variable->alloca, variable->type.decay()};
+        }
+
         return {builder_.CreateLoad(toLLVMType(variable->type), variable->alloca, expr.name), variable->type};
     }
 
+    // Resolves an lvalue expression (a variable or a `*ptr` dereference) to
+    // the storage address it names, without loading the value there.
+    LValue emitLValue(const ExprNode &expr) {
+        if (const auto *ident = dynamic_cast<const IdentExprNode *>(&expr)) {
+            const Variable *variable = lookupVariable(ident->name);
+            if (!variable) {
+                throw std::runtime_error(locationString(expr.location) + ": unknown variable '" + ident->name + "'");
+            }
+            return {variable->alloca, variable->type};
+        }
+        if (const auto *unary = dynamic_cast<const UnaryOpExprNode *>(&expr)) {
+            if (unary->op == UnaryOp::Deref) {
+                TypedValue ptr = emitExpr(*unary->operand);
+                return {ptr.value, ptr.type.pointee()};
+            }
+        }
+        if (const auto *index = dynamic_cast<const IndexExprNode *>(&expr)) {
+            // emitExpr decays an array base to a pointer automatically
+            // (via emitIdent), so indexing an array and indexing a real
+            // pointer both end up as a GEP off the same kind of value.
+            TypedValue base = emitExpr(*index->base);
+            TypedValue idx = emitExpr(*index->index);
+            llvm::Value *idxValue = castNumeric(idx.value, idx.type, Type::Int);
+            const Type element = base.type.pointee();
+            llvm::Value *addr =
+                builder_.CreateInBoundsGEP(toLLVMType(element), base.value, idxValue, "idxaddr");
+            return {addr, element};
+        }
+        throw std::runtime_error(locationString(expr.location) + ": expression is not assignable in codegen");
+    }
+
     TypedValue emitUnary(const UnaryOpExprNode &expr) {
+        if (expr.op == UnaryOp::AddressOf) {
+            LValue lv = emitLValue(*expr.operand);
+            return {lv.address, lv.type.pointerTo()};
+        }
+        if (expr.op == UnaryOp::Deref) {
+            LValue lv = emitLValue(expr);
+            return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "derefload"), lv.type};
+        }
+
         TypedValue operand = emitExpr(*expr.operand);
         if (!isNumericType(operand.type)) {
             throw std::runtime_error(locationString(expr.location) + ": invalid unary operand in codegen");
@@ -502,6 +567,7 @@ private:
             llvm::Value *notValue = builder_.CreateNot(toBool(operand), "nottmp");
             return {builder_.CreateZExt(notValue, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
         }
+        default: break;
         }
         throw std::runtime_error(locationString(expr.location) + ": unknown unary operator in codegen");
     }
@@ -553,6 +619,21 @@ private:
 
         TypedValue lhs = emitExpr(*expr.lhs);
         TypedValue rhs = emitExpr(*expr.rhs);
+
+        // Sema only allows pointer operands for == and != (pointer-to-pointer
+        // or pointer-vs-null-literal), so the only LLVM operand-type mismatch
+        // possible here is "pointer vs. the i32 constant 0" — replace that
+        // side with an actual null pointer constant so the icmp types match.
+        if (lhs.type.isPointer() || rhs.type.isPointer()) {
+            llvm::Value *left = lhs.type.isPointer() ? lhs.value
+                                                      : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+            llvm::Value *right = rhs.type.isPointer() ? rhs.value
+                                                       : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+            llvm::Value *cmp = expr.op == BinaryOp::Eq ? builder_.CreateICmpEQ(left, right, "eqtmp")
+                                                        : builder_.CreateICmpNE(left, right, "neqtmp");
+            return {builder_.CreateZExt(cmp, llvm::Type::getInt32Ty(context_), "cmptoint"), Type::Int};
+        }
+
         const Type common = commonNumericType(lhs.type, rhs.type);
         llvm::Value *left = castNumeric(lhs.value, lhs.type, common);
         llvm::Value *right = castNumeric(rhs.value, rhs.type, common);
@@ -606,7 +687,7 @@ private:
             if (sig.isVariadic) {
                 args.push_back(castForPrintf(arg.value, arg.type));
             } else {
-                args.push_back(castNumeric(arg.value, arg.type, sig.paramTypes[i]));
+                args.push_back(castForStore(arg.value, arg.type, sig.paramTypes[i]));
             }
         }
 
@@ -652,6 +733,23 @@ private:
                                  "' to '" + typeName(to) + "'");
     }
 
+    // Like castNumeric, but also handles storing into a pointer-typed slot:
+    // same-type pointers pass through unchanged, and sema only ever lets an
+    // `int` flow into a pointer slot when it's a null-pointer-constant literal.
+    llvm::Value *castForStore(llvm::Value *value, Type from, Type to) {
+        if (to.isPointer()) {
+            if (from == to) {
+                return value;
+            }
+            if (from == Type::Int) {
+                return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+            }
+            throw std::runtime_error("invalid pointer conversion from '" + typeName(from) +
+                                     "' to '" + typeName(to) + "' in codegen");
+        }
+        return castNumeric(value, from, to);
+    }
+
     llvm::Value *castForPrintf(llvm::Value *value, Type type) {
         if (type == Type::Float) {
             return builder_.CreateFPExt(value, llvm::Type::getDoubleTy(context_), "printfdouble");
@@ -663,6 +761,11 @@ private:
     }
 
     llvm::Value *toBool(TypedValue value) {
+        if (value.type.isPointer()) {
+            return builder_.CreateICmpNE(value.value,
+                                         llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_)),
+                                         "booltmp");
+        }
         if (value.type == Type::Float) {
             return builder_.CreateFCmpONE(value.value,
                                           llvm::ConstantFP::get(llvm::Type::getFloatTy(context_), 0.0),

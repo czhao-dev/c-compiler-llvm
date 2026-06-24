@@ -77,6 +77,9 @@ int main() {
     assert(compileAndRun(dir + "/fibonacci.mc") == "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n");
     assert(compileAndRun(dir + "/gcd.mc") == "21\n");
     assert(compileAndRun(dir + "/sum_of_squares.mc") == "338350.000000\n");
+    assert(compileAndRun(dir + "/pointer_swap.mc") ==
+           "before: x=3 y=7\nafter: x=7 y=3\nincremented: 8\np is non-null\n");
+    assert(compileAndRun(dir + "/array_sum.mc") == "0\n1\n4\n9\n16\nsum=30\n");
 
     const std::string fizz = compileAndRun(dir + "/fizzbuzz.mc");
     assert(fizz.substr(0, 2) == "1\n");

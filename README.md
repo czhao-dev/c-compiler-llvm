@@ -47,12 +47,29 @@ MiniC supports a deliberately constrained subset of C. Every feature in
 scope is fully supported; anything outside scope is a clear compile error.
 
 **Types**
-`int`, `float`, `char`, and `void` (for function return types only).
-No pointers, no arrays, no structs in the first version.
+`int`, `float`, `char`, `void` (for function return types only), pointers to
+any of those (`int *`, `float **`, ...), and fixed-size single-dimension
+arrays (`int arr[10]`). No structs yet — see
+[docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan to add them.
 
-**Variables**
+**Variables and pointers**
 Local variable declarations with initializers (`int x = 5;`),
 assignment statements (`x = x + 1;`), and use of variables in expressions.
+Address-of (`&x`) and dereference (`*p`) work as prefix unary operators,
+including assignment through a dereferenced pointer (`*p = 5;`). A pointer
+may be compared with `==`/`!=` against another pointer of the same type or
+against the literal `0` (a null-pointer constant), and used directly as an
+`if`/`while` condition (true when non-null).
+
+**Arrays**
+A local variable may be declared with a fixed size (`int arr[10];`) and
+indexed for reading or writing (`arr[i] = arr[i] + 1;`). An array decays to
+a pointer to its first element wherever it's used as a value — the same
+`arr[i]` syntax works whether `arr` is a real array or a pointer parameter
+that received a decayed array, and an array can be passed directly where a
+pointer parameter is expected. Arrays aren't assignable as a whole and have
+no literal-initializer syntax; there's no multi-dimensional array or
+pointer-to-array type yet.
 
 **Arithmetic operators**
 `+`, `-`, `*`, `/` with standard precedence and associativity.
@@ -259,7 +276,7 @@ Total Test time (real) =   1.5 sec
 | `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
 | `parser_test` | AST shape for every grammar construct, plus parse-error messages |
 | `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `codegen_test` | Compiles and **runs** all four example programs through the full pipeline, asserting on exact stdout |
+| `codegen_test` | Compiles and **runs** all six example programs through the full pipeline, asserting on exact stdout |
 | `smoke_test` | End-to-end CLI sanity check |
 
 **Output correctness is cross-validated against clang.** Every example
@@ -271,6 +288,8 @@ fibonacci: IDENTICAL
 fizzbuzz:  IDENTICAL
 gcd:       IDENTICAL
 sum_of_squares: IDENTICAL
+pointer_swap: IDENTICAL
+array_sum: IDENTICAL
 ```
 
 ### Bug hunt and hardening
@@ -346,7 +365,9 @@ minic-compiler/
 │   ├── fibonacci.mc
 │   ├── sum_of_squares.mc
 │   ├── fizzbuzz.mc
-│   └── gcd.mc
+│   ├── gcd.mc
+│   ├── pointer_swap.mc
+│   └── array_sum.mc
 └── docs/
     ├── ROADMAP.md           ← build plan + language-coverage roadmap
     ├── language_spec.md     ← BNF grammar + type rules

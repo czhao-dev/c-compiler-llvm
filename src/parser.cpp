@@ -139,7 +139,10 @@ std::unique_ptr<FuncDefNode> Parser::parseFuncDef() {
         error(typeTok, "expected a return type");
     }
     advance();
-    const Type returnType = tokenToType(typeTok.type);
+    Type returnType = tokenToType(typeTok.type);
+    while (match(TokenType::Star)) {
+        returnType = returnType.pointerTo();
+    }
 
     const Token &nameTok = expect(TokenType::Identifier, "expected function name");
     expect(TokenType::LeftParen, "expected '(' after function name");
@@ -164,7 +167,10 @@ ParamNode Parser::parseParam() {
         error(typeTok, "expected parameter type");
     }
     advance();
-    const Type type = tokenToType(typeTok.type);
+    Type type = tokenToType(typeTok.type);
+    while (match(TokenType::Star)) {
+        type = type.pointerTo();
+    }
     const Token &nameTok = expect(TokenType::Identifier, "expected parameter name");
     return ParamNode{type, nameTok.lexeme, typeTok.location};
 }
@@ -203,6 +209,7 @@ StmtPtr Parser::parseStatement() {
     case TokenType::Continue:
         return parseContinue();
     case TokenType::Identifier:
+    case TokenType::Star:
         return parseAssignOrExprStmt();
     default:
         error(peek(), "expected a statement");
@@ -211,8 +218,25 @@ StmtPtr Parser::parseStatement() {
 
 std::unique_ptr<VarDeclStmtNode> Parser::parseVarDeclNoSemi() {
     const Token &typeTok = advance();
-    const Type type = tokenToType(typeTok.type);
+    Type type = tokenToType(typeTok.type);
+    while (match(TokenType::Star)) {
+        type = type.pointerTo();
+    }
     const Token &nameTok = expect(TokenType::Identifier, "expected variable name");
+
+    if (match(TokenType::LeftBracket)) {
+        const Token &sizeTok = expect(TokenType::IntLiteral, "expected array size");
+        expect(TokenType::RightBracket, "expected ']' after array size");
+        const long long size = std::stoll(sizeTok.lexeme);
+        // A Type's arrayLength of 0 means "not an array" (see Type::isArray
+        // in ast.h), so a literal size of 0 can't be represented as an
+        // array type at all — reject it here rather than silently parsing
+        // `int a[0];` as the scalar declaration `int a;`.
+        if (size <= 0) {
+            error(sizeTok, "array size must be a positive integer");
+        }
+        type = type.arrayOf(static_cast<int>(size));
+    }
 
     ExprPtr init;
     if (match(TokenType::Assign)) {
@@ -228,26 +252,30 @@ StmtPtr Parser::parseVarDecl() {
 }
 
 std::unique_ptr<AssignStmtNode> Parser::parseAssignNoSemi() {
-    const Token &nameTok = expect(TokenType::Identifier, "expected identifier");
+    const Token &startTok = peek();
+    ExprPtr target = parseUnary();
     expect(TokenType::Assign, "expected '=' in assignment");
     ExprPtr value = parseExpression();
-    return std::make_unique<AssignStmtNode>(nameTok.location, nameTok.lexeme, std::move(value));
+    return std::make_unique<AssignStmtNode>(startTok.location, std::move(target), std::move(value));
 }
 
 StmtPtr Parser::parseAssignOrExprStmt() {
-    const Token &nameTok = peek();
-    if (peek(1).type == TokenType::Assign) {
-        auto assign = parseAssignNoSemi();
+    const Token &startTok = peek();
+    ExprPtr expr = parseUnary();
+
+    if (check(TokenType::Assign)) {
+        advance();
+        ExprPtr value = parseExpression();
         expect(TokenType::Semicolon, "expected ';' after assignment");
-        return assign;
+        return std::make_unique<AssignStmtNode>(startTok.location, std::move(expr), std::move(value));
     }
-    if (peek(1).type == TokenType::LeftParen) {
-        advance(); // consume identifier
-        ExprPtr call = parseCallExpr(nameTok);
+
+    if (dynamic_cast<const CallExprNode *>(expr.get())) {
         expect(TokenType::Semicolon, "expected ';' after expression statement");
-        return std::make_unique<ExprStmtNode>(nameTok.location, std::move(call));
+        return std::make_unique<ExprStmtNode>(startTok.location, std::move(expr));
     }
-    error(peek(1), "expected '=' or '(' after identifier");
+
+    error(peek(), "expected '=' or '(' after expression");
 }
 
 StmtPtr Parser::parseIf() {
@@ -348,7 +376,7 @@ StmtPtr Parser::parseContinue() {
 // Expressions
 //
 // Precedence, lowest to highest: || , && , == != , < > <= >= , + - , * / ,
-// unary ! - , primary.
+// unary ! - & * (address-of / deref), postfix [] (indexing), primary.
 // ---------------------------------------------------------------------------
 
 ExprPtr Parser::parseExpression() {
@@ -433,7 +461,24 @@ ExprPtr Parser::parseUnary() {
         ExprPtr operand = parseUnary();
         return std::make_unique<UnaryOpExprNode>(opTok.location, op, std::move(operand));
     }
-    return parsePrimary();
+    if (check(TokenType::Ampersand) || check(TokenType::Star)) {
+        const Token &opTok = advance();
+        const UnaryOp op = opTok.type == TokenType::Ampersand ? UnaryOp::AddressOf : UnaryOp::Deref;
+        ExprPtr operand = parseUnary();
+        return std::make_unique<UnaryOpExprNode>(opTok.location, op, std::move(operand));
+    }
+    return parsePostfix();
+}
+
+ExprPtr Parser::parsePostfix() {
+    ExprPtr expr = parsePrimary();
+    while (check(TokenType::LeftBracket)) {
+        const Token &bracketTok = advance();
+        ExprPtr index = parseExpression();
+        expect(TokenType::RightBracket, "expected ']' after array index");
+        expr = std::make_unique<IndexExprNode>(bracketTok.location, std::move(expr), std::move(index));
+    }
+    return expr;
 }
 
 ExprPtr Parser::parsePrimary() {

@@ -10,6 +10,24 @@ bool isNumericType(Type type) {
     return type == Type::Int || type == Type::Float || type == Type::Char;
 }
 
+bool isLValueExpr(const ExprNode &expr) {
+    if (dynamic_cast<const IdentExprNode *>(&expr)) {
+        return true;
+    }
+    if (const auto *unary = dynamic_cast<const UnaryOpExprNode *>(&expr)) {
+        return unary->op == UnaryOp::Deref;
+    }
+    if (dynamic_cast<const IndexExprNode *>(&expr)) {
+        return true;
+    }
+    return false;
+}
+
+bool isNullPointerConstant(const ExprNode &expr) {
+    const auto *lit = dynamic_cast<const IntLitExprNode *>(&expr);
+    return lit != nullptr && lit->value == 0;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -162,14 +180,14 @@ void SemanticAnalyzer::checkStmt(const StmtNode &stmt) {
 }
 
 void SemanticAnalyzer::checkVarDecl(const VarDeclStmtNode &decl) {
-    if (decl.type == Type::Void) {
+    if (decl.type.elementType() == Type::Void) {
         error(decl.location, "variable '" + decl.name + "' cannot have type 'void'");
     }
 
     if (decl.init) {
         const Type valueType = checkExpr(*decl.init);
         checkAssignable(decl.location, decl.type, valueType,
-                         "initializer for '" + decl.name + "'");
+                         "initializer for '" + decl.name + "'", decl.init.get());
     }
 
     if (!symbols_.declare(decl.name, decl.type)) {
@@ -178,15 +196,27 @@ void SemanticAnalyzer::checkVarDecl(const VarDeclStmtNode &decl) {
 }
 
 void SemanticAnalyzer::checkAssign(const AssignStmtNode &assign) {
-    const Type *targetType = symbols_.lookup(assign.name);
-    if (!targetType) {
-        error(assign.location, "use of undeclared variable '" + assign.name + "'");
-        checkExpr(*assign.value);
+    // Arrays are not assignable as a whole, only element-by-element via
+    // `arr[i] = ...`; reject `arr = ...` before the generic decay-on-read
+    // path in checkExpr/checkIdent hides the array-ness of the target.
+    if (const auto *ident = dynamic_cast<const IdentExprNode *>(assign.target.get())) {
+        if (const Type *declaredType = symbols_.lookup(ident->name);
+            declaredType && declaredType->isArray()) {
+            error(assign.location, "array '" + ident->name + "' is not assignable");
+            checkExpr(*assign.value);
+            return;
+        }
+    }
+
+    const Type targetType = checkExpr(*assign.target);
+    const Type valueType = checkExpr(*assign.value);
+
+    if (!isLValueExpr(*assign.target)) {
+        error(assign.location, "left-hand side of assignment is not assignable");
         return;
     }
 
-    const Type valueType = checkExpr(*assign.value);
-    checkAssignable(assign.location, *targetType, valueType, "assignment to '" + assign.name + "'");
+    checkAssignable(assign.location, targetType, valueType, "assignment", assign.value.get());
 }
 
 void SemanticAnalyzer::checkIf(const IfStmtNode &stmt) {
@@ -245,7 +275,7 @@ void SemanticAnalyzer::checkReturn(const ReturnStmtNode &stmt) {
             error(stmt.location, "void function '" + funcName + "' should not return a value");
         } else {
             checkAssignable(stmt.location, returnType, valueType,
-                             "return value of function '" + funcName + "'");
+                             "return value of function '" + funcName + "'", stmt.value.get());
         }
     } else if (returnType != Type::Void) {
         error(stmt.location, "non-void function '" + funcName + "' must return a value");
@@ -253,8 +283,8 @@ void SemanticAnalyzer::checkReturn(const ReturnStmtNode &stmt) {
 }
 
 void SemanticAnalyzer::checkCondition(const SourceLocation &location, Type type) {
-    if (!isNumericType(type)) {
-        error(location, "condition must have a numeric type, got '" + typeName(type) + "'");
+    if (!isNumericType(type) && !type.isPointer()) {
+        error(location, "condition must have a numeric or pointer type, got '" + typeName(type) + "'");
     }
 }
 
@@ -283,6 +313,9 @@ Type SemanticAnalyzer::checkExpr(const ExprNode &expr) {
     if (const auto *call = dynamic_cast<const CallExprNode *>(&expr)) {
         return checkCall(*call);
     }
+    if (const auto *index = dynamic_cast<const IndexExprNode *>(&expr)) {
+        return checkIndex(*index);
+    }
     return Type::Int;
 }
 
@@ -292,10 +325,48 @@ Type SemanticAnalyzer::checkIdent(const IdentExprNode &expr) {
         error(expr.location, "use of undeclared variable '" + expr.name + "'");
         return Type::Int;
     }
-    return *type;
+    // An array decays to a pointer to its first element whenever it's read
+    // as a value (matching C); the array's own storage is only exposed
+    // through emitLValue, e.g. for indexing or passing it to a function.
+    return type->isArray() ? type->decay() : *type;
 }
 
 Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
+    if (expr.op == UnaryOp::AddressOf) {
+        // MiniC has no pointer-to-array type, so &arr can't be represented
+        // correctly; check this directly (before checkExpr decays the
+        // array to a pointer and hides its array-ness).
+        if (const auto *ident = dynamic_cast<const IdentExprNode *>(expr.operand.get())) {
+            if (const Type *declaredType = symbols_.lookup(ident->name);
+                declaredType && declaredType->isArray()) {
+                error(expr.location, "cannot take the address of array '" + ident->name +
+                                          "'; it already converts to a pointer when used as a value");
+                return declaredType->elementType().pointerTo();
+            }
+        }
+
+        const Type operandType = checkExpr(*expr.operand);
+        if (!isLValueExpr(*expr.operand)) {
+            error(expr.location, "cannot take the address of a non-lvalue expression");
+            return operandType.pointerTo();
+        }
+        return operandType.pointerTo();
+    }
+
+    if (expr.op == UnaryOp::Deref) {
+        const Type operandType = checkExpr(*expr.operand);
+        if (!operandType.isPointer()) {
+            error(expr.location, "cannot dereference non-pointer type '" + typeName(operandType) + "'");
+            return Type::Int;
+        }
+        const Type pointee = operandType.pointee();
+        if (pointee == Type::Void) {
+            error(expr.location, "cannot dereference pointer to incomplete type 'void'");
+            return Type::Int;
+        }
+        return pointee;
+    }
+
     const Type operandType = checkExpr(*expr.operand);
     if (!isNumericType(operandType)) {
         error(expr.location, "invalid operand to unary '" + unaryOpSymbol(expr.op) + "': '" +
@@ -306,6 +377,7 @@ Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
     switch (expr.op) {
     case UnaryOp::Negate: return operandType == Type::Float ? Type::Float : Type::Int;
     case UnaryOp::Not: return Type::Int;
+    default: break;
     }
     return Type::Int;
 }
@@ -313,6 +385,21 @@ Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
 Type SemanticAnalyzer::checkBinOp(const BinOpExprNode &expr) {
     const Type lhsType = checkExpr(*expr.lhs);
     const Type rhsType = checkExpr(*expr.rhs);
+
+    if (lhsType.isPointer() || rhsType.isPointer()) {
+        const bool isEqOrNeq = expr.op == BinaryOp::Eq || expr.op == BinaryOp::Neq;
+        const bool samePointerType = lhsType == rhsType;
+        const bool lhsNullAgainstPointer =
+            rhsType.isPointer() && lhsType == Type::Int && isNullPointerConstant(*expr.lhs);
+        const bool rhsNullAgainstPointer =
+            lhsType.isPointer() && rhsType == Type::Int && isNullPointerConstant(*expr.rhs);
+        if (isEqOrNeq && (samePointerType || lhsNullAgainstPointer || rhsNullAgainstPointer)) {
+            return Type::Int;
+        }
+        error(expr.location, "invalid operands to binary '" + binaryOpSymbol(expr.op) + "': '" +
+                                  typeName(lhsType) + "' and '" + typeName(rhsType) + "'");
+        return Type::Int;
+    }
 
     if (!isNumericType(lhsType) || !isNumericType(rhsType)) {
         error(expr.location, "invalid operands to binary '" + binaryOpSymbol(expr.op) + "': '" +
@@ -355,16 +442,46 @@ Type SemanticAnalyzer::checkCall(const CallExprNode &expr) {
         const Type argType = checkExpr(*expr.args[i]);
         if (!sig.isVariadic && i < sig.paramTypes.size()) {
             checkAssignable(expr.args[i]->location, sig.paramTypes[i], argType,
-                             "argument " + std::to_string(i + 1) + " to '" + expr.callee + "'");
+                             "argument " + std::to_string(i + 1) + " to '" + expr.callee + "'",
+                             expr.args[i].get());
         }
     }
 
     return sig.returnType;
 }
 
+Type SemanticAnalyzer::checkIndex(const IndexExprNode &expr) {
+    const Type baseType = checkExpr(*expr.base);
+    const Type indexType = checkExpr(*expr.index);
+
+    if (!isNumericType(indexType)) {
+        error(expr.location, "array subscript is not an integer");
+    }
+
+    if (!baseType.isPointer()) {
+        error(expr.location, "subscripted value is not an array or pointer ('" + typeName(baseType) + "')");
+        return Type::Int;
+    }
+
+    const Type element = baseType.pointee();
+    if (element == Type::Void) {
+        error(expr.location, "cannot subscript pointer to incomplete type 'void'");
+        return Type::Int;
+    }
+    return element;
+}
+
 void SemanticAnalyzer::checkAssignable(const SourceLocation &location, Type target, Type value,
-                                        const std::string &context) {
+                                        const std::string &context, const ExprNode *valueExpr) {
     if (target == value) {
+        return;
+    }
+
+    if (target.isPointer() || value.isPointer()) {
+        if (target.isPointer() && value == Type::Int && valueExpr && isNullPointerConstant(*valueExpr)) {
+            return;
+        }
+        error(location, context + ": cannot convert '" + typeName(value) + "' to '" + typeName(target) + "'");
         return;
     }
 
