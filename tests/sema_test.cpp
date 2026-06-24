@@ -72,7 +72,7 @@ int main() {
 
     // Every example program is well-typed: zero diagnostics.
     for (const std::string &name : {"fibonacci.mc", "gcd.mc", "fizzbuzz.mc", "sum_of_squares.mc",
-                                     "pointer_swap.mc", "array_sum.mc"}) {
+                                     "pointer_swap.mc", "array_sum.mc", "struct_point.mc"}) {
         const auto diags = analyzeFile(examplesDir + "/" + name);
         if (!diags.empty()) {
             for (const auto &diag : diags) {
@@ -365,6 +365,92 @@ int main() {
             assert(std::string(ex.what()).find("array size must be a positive integer") != std::string::npos);
         }
         assert(threw);
+    }
+
+    // Structs/unions/enums: declaration, member access (read/write via . and
+    // ->), by-value struct params/returns/assignment (copy semantics), enum
+    // constants, and forward field references (B used by value in A, B
+    // declared afterward) are all well-typed.
+    {
+        const auto diags = analyzeSource(
+            "struct A { struct B b; int x; };\n"
+            "struct B { int y; };\n"
+            "\n"
+            "enum Color { RED, GREEN, BLUE };\n"
+            "\n"
+            "union Number { int i; float f; };\n"
+            "\n"
+            "struct A makeA() {\n"
+            "    struct A a;\n"
+            "    a.x = 1;\n"
+            "    a.b.y = 2;\n"
+            "    return a;\n"
+            "}\n"
+            "\n"
+            "void touch(struct A *p) {\n"
+            "    p->x = p->x + 1;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    struct A a = makeA();\n"
+            "    struct A copy = a;\n"
+            "    touch(&copy);\n"
+            "    int c = GREEN;\n"
+            "    union Number n;\n"
+            "    n.i = 5;\n"
+            "    return a.x + copy.x + a.b.y + c + n.i;\n"
+            "}\n");
+        assert(diags.empty());
+    }
+
+    // A struct can't directly contain itself by value.
+    {
+        const auto diags = analyzeSource("struct Node { struct Node next; };\n"
+                                          "int main() { return 0; }\n");
+        assert(hasError(diags, "would have infinite size"));
+    }
+
+    // ...but a pointer to itself is fine (the standard linked-structure idiom).
+    {
+        const auto diags = analyzeSource("struct Node { struct Node *next; int val; };\n"
+                                          "int main() { return 0; }\n");
+        assert(diags.empty());
+    }
+
+    // Referencing an undeclared struct tag is an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    struct Foo p;\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(hasError(diags, "use of undeclared struct 'Foo'"));
+    }
+
+    // Accessing a field that doesn't exist is an error.
+    {
+        const auto diags = analyzeSource("struct Point { int x; int y; };\n"
+                                          "int main() {\n"
+                                          "    struct Point p;\n"
+                                          "    return p.z;\n"
+                                          "}\n");
+        assert(hasError(diags, "no member named 'z' in 'struct Point'"));
+    }
+
+    // Member access on a non-struct/union type is an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    int x = 5;\n"
+                                          "    return x.y;\n"
+                                          "}\n");
+        assert(hasError(diags, "is not a struct or union"));
+    }
+
+    // struct/union/enum tags share one namespace.
+    {
+        const auto diags = analyzeSource("struct Foo { int x; };\n"
+                                          "union Foo { int y; };\n"
+                                          "int main() { return 0; }\n");
+        assert(hasError(diags, "redefinition of 'Foo'"));
     }
 
     // Redefinition of a function.

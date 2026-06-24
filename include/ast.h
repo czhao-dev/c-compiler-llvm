@@ -18,6 +18,11 @@ enum class TypeKind {
     // MiniC has no first-class string type; string literals are only valid
     // as printf arguments.
     String,
+    // A named struct or union (Type::aggregateName() holds the tag name).
+    // There is no first-class "enum type": enum constants are resolved to
+    // plain Type::Int values, so enum needs no TypeKind of its own.
+    Struct,
+    Union,
 };
 
 // A MiniC type: a base kind, a pointer-indirection depth (0 = not a
@@ -30,32 +35,45 @@ enum class TypeKind {
 // pointerDepth}". Only one array dimension is supported (no arrays of
 // arrays) and there is no pointer-to-array type — taking the address of an
 // array variable is rejected by sema rather than modeled here.
+//
+// When `kind` is Struct or Union, `aggregateName` holds the struct/union's
+// tag name (e.g. "Point" for `struct Point`); it's empty for every other
+// kind. Two aggregate Types are equal only if their tag names match.
 class Type {
 public:
-    constexpr Type() : kind_(TypeKind::Int), pointerDepth_(0), arrayLength_(0) {}
-    constexpr explicit Type(TypeKind kind, int pointerDepth = 0, int arrayLength = 0)
+    Type() : kind_(TypeKind::Int), pointerDepth_(0), arrayLength_(0) {}
+    explicit Type(TypeKind kind, int pointerDepth = 0, int arrayLength = 0)
         : kind_(kind), pointerDepth_(pointerDepth), arrayLength_(arrayLength) {}
 
-    constexpr TypeKind kind() const { return kind_; }
-    constexpr int pointerDepth() const { return pointerDepth_; }
-    constexpr bool isPointer() const { return pointerDepth_ > 0; }
-    constexpr Type pointerTo() const { return Type(kind_, pointerDepth_ + 1); }
+    TypeKind kind() const { return kind_; }
+    int pointerDepth() const { return pointerDepth_; }
+    bool isPointer() const { return pointerDepth_ > 0; }
+    Type pointerTo() const { return withDepthAndLength(pointerDepth_ + 1, 0); }
     // Caller must check isPointer() first.
-    constexpr Type pointee() const { return Type(kind_, pointerDepth_ - 1); }
+    Type pointee() const { return withDepthAndLength(pointerDepth_ - 1, 0); }
 
-    constexpr bool isArray() const { return arrayLength_ > 0; }
-    constexpr int arrayLength() const { return arrayLength_; }
+    bool isArray() const { return arrayLength_ > 0; }
+    int arrayLength() const { return arrayLength_; }
     // This type with the array dimension stripped (same kind/pointerDepth).
-    constexpr Type elementType() const { return Type(kind_, pointerDepth_, 0); }
+    Type elementType() const { return withDepthAndLength(pointerDepth_, 0); }
     // The pointer type an array decays to when used as a value.
-    constexpr Type decay() const { return Type(kind_, pointerDepth_ + 1, 0); }
+    Type decay() const { return withDepthAndLength(pointerDepth_ + 1, 0); }
     // Builds "array of `length`" from this (non-array) type.
-    constexpr Type arrayOf(int length) const { return Type(kind_, pointerDepth_, length); }
+    Type arrayOf(int length) const { return withDepthAndLength(pointerDepth_, length); }
 
-    friend constexpr bool operator==(const Type &a, const Type &b) {
-        return a.kind_ == b.kind_ && a.pointerDepth_ == b.pointerDepth_ && a.arrayLength_ == b.arrayLength_;
+    bool isStruct() const { return kind_ == TypeKind::Struct; }
+    bool isUnion() const { return kind_ == TypeKind::Union; }
+    bool isAggregate() const { return isStruct() || isUnion(); }
+    const std::string &aggregateName() const { return aggregateName_; }
+
+    static Type namedStruct(std::string name, int pointerDepth = 0, int arrayLength = 0);
+    static Type namedUnion(std::string name, int pointerDepth = 0, int arrayLength = 0);
+
+    friend bool operator==(const Type &a, const Type &b) {
+        return a.kind_ == b.kind_ && a.pointerDepth_ == b.pointerDepth_ && a.arrayLength_ == b.arrayLength_ &&
+               a.aggregateName_ == b.aggregateName_;
     }
-    friend constexpr bool operator!=(const Type &a, const Type &b) { return !(a == b); }
+    friend bool operator!=(const Type &a, const Type &b) { return !(a == b); }
 
     static const Type Int;
     static const Type Float;
@@ -64,9 +82,16 @@ public:
     static const Type String;
 
 private:
+    Type withDepthAndLength(int pointerDepth, int arrayLength) const {
+        Type result(kind_, pointerDepth, arrayLength);
+        result.aggregateName_ = aggregateName_;
+        return result;
+    }
+
     TypeKind kind_;
     int pointerDepth_;
     int arrayLength_;
+    std::string aggregateName_;
 };
 
 std::string typeName(Type type);
@@ -193,6 +218,18 @@ public:
     ExprPtr index;
 };
 
+// `base.field`. `base->field` is desugared by the parser into
+// MemberExprNode{UnaryOpExprNode{Deref, base}, field}, so this node only
+// ever represents the dot form.
+class MemberExprNode : public ExprNode {
+public:
+    MemberExprNode(SourceLocation location, ExprPtr base, std::string field);
+    void print(std::ostream &out, int indent) const override;
+
+    ExprPtr base;
+    std::string field;
+};
+
 class CallExprNode : public ExprNode {
 public:
     CallExprNode(SourceLocation location, std::string callee, std::vector<ExprPtr> args);
@@ -307,6 +344,50 @@ struct ParamNode {
     void print(std::ostream &out, int indent) const;
 };
 
+struct FieldNode {
+    Type type;
+    std::string name;
+    SourceLocation location;
+
+    void print(std::ostream &out, int indent) const;
+};
+
+// A `struct Name { ... };` or `union Name { ... };` declaration. Both kinds
+// share this shape; `isUnion` distinguishes how codegen lays out storage
+// (sequential fields for a struct, all fields overlapping at offset 0 for
+// a union).
+class AggregateDeclNode {
+public:
+    AggregateDeclNode(SourceLocation location, std::string name, std::vector<FieldNode> fields, bool isUnion);
+
+    void print(std::ostream &out, int indent) const;
+
+    SourceLocation location;
+    std::string name;
+    std::vector<FieldNode> fields;
+    bool isUnion;
+};
+
+struct EnumeratorNode {
+    std::string name;
+    long long value;
+    SourceLocation location;
+};
+
+// An `enum Name { A, B = 2, ... };` declaration. Enumerators resolve to
+// plain `int` constants (see Type's doc comment) — this node exists only
+// so sema can register the constants and reject a duplicate tag name.
+class EnumDeclNode {
+public:
+    EnumDeclNode(SourceLocation location, std::string name, std::vector<EnumeratorNode> enumerators);
+
+    void print(std::ostream &out, int indent) const;
+
+    SourceLocation location;
+    std::string name;
+    std::vector<EnumeratorNode> enumerators;
+};
+
 class FuncDefNode {
 public:
     FuncDefNode(SourceLocation location, Type returnType, std::string name,
@@ -325,6 +406,8 @@ class ProgramNode {
 public:
     void print(std::ostream &out, int indent = 0) const;
 
+    std::vector<std::unique_ptr<AggregateDeclNode>> aggregates;
+    std::vector<std::unique_ptr<EnumDeclNode>> enums;
     std::vector<std::unique_ptr<FuncDefNode>> functions;
 };
 

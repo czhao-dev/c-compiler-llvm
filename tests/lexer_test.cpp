@@ -127,6 +127,44 @@ int main() {
         });
 
     expectTypes(
+        "struct Point { int x; }; p.x = 1; p->x;",
+        {
+            TokenType::Struct,
+            TokenType::Identifier,
+            TokenType::LeftBrace,
+            TokenType::Int,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::RightBrace,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::Dot,
+            TokenType::Identifier,
+            TokenType::Assign,
+            TokenType::IntLiteral,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::Arrow,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::EndOfFile,
+        });
+
+    expectTypes(
+        "union U {} enum E {}",
+        {
+            TokenType::Union,
+            TokenType::Identifier,
+            TokenType::LeftBrace,
+            TokenType::RightBrace,
+            TokenType::Enum,
+            TokenType::Identifier,
+            TokenType::LeftBrace,
+            TokenType::RightBrace,
+            TokenType::EndOfFile,
+        });
+
+    expectTypes(
         "int *p = &x; int y = *p;",
         {
             TokenType::Int,

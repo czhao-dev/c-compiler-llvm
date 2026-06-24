@@ -57,7 +57,22 @@ private:
         bool isVariadic = false;
     };
 
+    // Ordered (name, type) fields of a struct or union, keyed by tag name.
+    struct AggregateInfo {
+        std::vector<std::pair<std::string, Type>> fields;
+        bool isUnion = false;
+    };
+
     void collectSignatures(const ProgramNode &program);
+    // Two-phase, mirroring collectSignatures' role for functions: phase 1
+    // registers every struct/union/enum tag name (so fields can reference
+    // any other aggregate regardless of declaration order); phase 2
+    // resolves and validates each aggregate's field types.
+    void collectTypeDeclarations(const ProgramNode &program);
+    void checkAggregateFields(const AggregateDeclNode &decl);
+    // Errors if `type` (or, for an array/pointer, its element type) names a
+    // struct/union tag that was never declared.
+    void checkTypeIsValid(const SourceLocation &location, Type type);
     void checkFunction(const FuncDefNode &func);
 
     void checkBlock(const BlockStmtNode &block);
@@ -76,6 +91,7 @@ private:
     Type checkBinOp(const BinOpExprNode &expr);
     Type checkCall(const CallExprNode &expr);
     Type checkIndex(const IndexExprNode &expr);
+    Type checkMember(const MemberExprNode &expr);
 
     // Checks that a value of type `value` may be stored into (or returned
     // as, or passed as an argument of) type `target`. Reports an error for
@@ -91,6 +107,12 @@ private:
 
     std::vector<Diagnostic> diagnostics_;
     std::unordered_map<std::string, FunctionSignature> functions_;
+    std::unordered_map<std::string, AggregateInfo> aggregates_;
+    // Tag names (struct/union/enum) share one namespace, matching C, so
+    // `struct Foo` and `union Foo` can't both exist; checked independently
+    // of `aggregates_`, which only holds struct/union field layouts.
+    std::unordered_map<std::string, SourceLocation> tagNames_;
+    std::unordered_map<std::string, long long> enumConstants_;
     SymbolTable symbols_;
     const FuncDefNode *currentFunction_ = nullptr;
     int loopDepth_ = 0;

@@ -48,9 +48,11 @@ scope is fully supported; anything outside scope is a clear compile error.
 
 **Types**
 `int`, `float`, `char`, `void` (for function return types only), pointers to
-any of those (`int *`, `float **`, ...), and fixed-size single-dimension
-arrays (`int arr[10]`). No structs yet — see
-[docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan to add them.
+any of those (`int *`, `float **`, ...), fixed-size single-dimension arrays
+(`int arr[10]`), and named structs/unions/enums (`struct Point`, `union
+Number`, `enum Color`). See [docs/ROADMAP.md](docs/ROADMAP.md) for what's
+still missing (bitwise operators, `switch`, casts, `sizeof`, storage
+classes, function prototypes).
 
 **Variables and pointers**
 Local variable declarations with initializers (`int x = 5;`),
@@ -70,6 +72,18 @@ that received a decayed array, and an array can be passed directly where a
 pointer parameter is expected. Arrays aren't assignable as a whole and have
 no literal-initializer syntax; there's no multi-dimensional array or
 pointer-to-array type yet.
+
+**Structs, unions, and enums**
+`struct`/`union` declarations with named fields, accessed with `.` (and
+`->` for pointers, which desugars to `(*p).field`). Struct/union values are
+first-class — local variables, function parameters/returns, and whole-value
+assignment (`p2 = p1;`, a real field-by-field copy) all just work, the same
+as for `int`. A field's type may reference any other struct/union
+regardless of declaration order; only direct by-value self-containment is
+rejected (`struct Node { struct Node n; };` — use a pointer field instead).
+`enum` declares named `int` constants (`enum Color { RED, GREEN, BLUE };`)
+rather than a distinct type. No anonymous structs/unions, nested struct
+*definitions*, or struct-literal initializers yet.
 
 **Arithmetic operators**
 `+`, `-`, `*`, `/` with standard precedence and associativity.
@@ -276,7 +290,7 @@ Total Test time (real) =   1.5 sec
 | `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
 | `parser_test` | AST shape for every grammar construct, plus parse-error messages |
 | `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `codegen_test` | Compiles and **runs** all six example programs through the full pipeline, asserting on exact stdout |
+| `codegen_test` | Compiles and **runs** all seven example programs through the full pipeline, asserting on exact stdout |
 | `smoke_test` | End-to-end CLI sanity check |
 
 **Output correctness is cross-validated against clang.** Every example
@@ -290,6 +304,7 @@ gcd:       IDENTICAL
 sum_of_squares: IDENTICAL
 pointer_swap: IDENTICAL
 array_sum: IDENTICAL
+struct_point: IDENTICAL
 ```
 
 ### Bug hunt and hardening
@@ -367,7 +382,8 @@ minic-compiler/
 │   ├── fizzbuzz.mc
 │   ├── gcd.mc
 │   ├── pointer_swap.mc
-│   └── array_sum.mc
+│   ├── array_sum.mc
+│   └── struct_point.mc
 └── docs/
     ├── ROADMAP.md           ← build plan + language-coverage roadmap
     ├── language_spec.md     ← BNF grammar + type rules

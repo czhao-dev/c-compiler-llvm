@@ -19,6 +19,18 @@ const Type Type::Char = Type(TypeKind::Char);
 const Type Type::Void = Type(TypeKind::Void);
 const Type Type::String = Type(TypeKind::String);
 
+Type Type::namedStruct(std::string name, int pointerDepth, int arrayLength) {
+    Type type(TypeKind::Struct, pointerDepth, arrayLength);
+    type.aggregateName_ = std::move(name);
+    return type;
+}
+
+Type Type::namedUnion(std::string name, int pointerDepth, int arrayLength) {
+    Type type(TypeKind::Union, pointerDepth, arrayLength);
+    type.aggregateName_ = std::move(name);
+    return type;
+}
+
 std::string typeName(Type type) {
     std::string base;
     switch (type.kind()) {
@@ -27,6 +39,8 @@ std::string typeName(Type type) {
     case TypeKind::Char: base = "char"; break;
     case TypeKind::Void: base = "void"; break;
     case TypeKind::String: base = "string"; break;
+    case TypeKind::Struct: base = "struct " + type.aggregateName(); break;
+    case TypeKind::Union: base = "union " + type.aggregateName(); break;
     }
     std::string result = base + std::string(type.pointerDepth(), '*');
     if (type.isArray()) {
@@ -134,6 +148,15 @@ void IndexExprNode::print(std::ostream &out, int indent) const {
     out << "Index\n";
     base->print(out, indent + 1);
     index->print(out, indent + 1);
+}
+
+MemberExprNode::MemberExprNode(SourceLocation location, ExprPtr base, std::string field)
+    : ExprNode(std::move(location)), base(std::move(base)), field(std::move(field)) {}
+
+void MemberExprNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Member " << field << '\n';
+    base->print(out, indent + 1);
 }
 
 CallExprNode::CallExprNode(SourceLocation location, std::string callee, std::vector<ExprPtr> args)
@@ -290,6 +313,35 @@ void ParamNode::print(std::ostream &out, int indent) const {
     out << "Param " << typeName(type) << ' ' << name << '\n';
 }
 
+void FieldNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Field " << typeName(type) << ' ' << name << '\n';
+}
+
+AggregateDeclNode::AggregateDeclNode(SourceLocation location, std::string name, std::vector<FieldNode> fields,
+                                      bool isUnion)
+    : location(std::move(location)), name(std::move(name)), fields(std::move(fields)), isUnion(isUnion) {}
+
+void AggregateDeclNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << (isUnion ? "Union " : "Struct ") << name << '\n';
+    for (const auto &field : fields) {
+        field.print(out, indent + 1);
+    }
+}
+
+EnumDeclNode::EnumDeclNode(SourceLocation location, std::string name, std::vector<EnumeratorNode> enumerators)
+    : location(std::move(location)), name(std::move(name)), enumerators(std::move(enumerators)) {}
+
+void EnumDeclNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Enum " << name << '\n';
+    for (const auto &enumerator : enumerators) {
+        printIndent(out, indent + 1);
+        out << enumerator.name << " = " << enumerator.value << '\n';
+    }
+}
+
 FuncDefNode::FuncDefNode(SourceLocation location, Type returnType, std::string name,
                           std::vector<ParamNode> params, std::unique_ptr<BlockStmtNode> body)
     : location(std::move(location)), returnType(returnType), name(std::move(name)),
@@ -307,6 +359,12 @@ void FuncDefNode::print(std::ostream &out, int indent) const {
 void ProgramNode::print(std::ostream &out, int indent) const {
     printIndent(out, indent);
     out << "Program\n";
+    for (const auto &aggregate : aggregates) {
+        aggregate->print(out, indent + 1);
+    }
+    for (const auto &enumDecl : enums) {
+        enumDecl->print(out, indent + 1);
+    }
     for (const auto &func : functions) {
         func->print(out, indent + 1);
     }

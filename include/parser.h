@@ -27,11 +27,25 @@ private:
     [[noreturn]] void error(const Token &token, const std::string &message) const;
 
     bool isTypeToken(TokenType type) const;
+    // True for any token that can start a type: the builtin keywords, plus
+    // struct/union/enum (which start a *reference* to a previously declared
+    // tag, e.g. `struct Point p;` — not a new declaration).
+    bool startsType(TokenType type) const;
     Type tokenToType(TokenType type) const;
+    // Parses a type, including any struct/union tag reference and trailing
+    // '*'s, but not an array-size suffix (see parseArraySuffix).
+    Type parseType();
+    // Parses an optional "[size]" suffix onto `base`, used by both variable
+    // declarations and struct/union field declarations.
+    Type parseArraySuffix(Type base);
 
     // Top-level.
     std::unique_ptr<FuncDefNode> parseFuncDef();
     ParamNode parseParam();
+    std::unique_ptr<AggregateDeclNode> parseAggregateDecl(bool isUnion);
+    FieldNode parseFieldDecl();
+    std::unique_ptr<EnumDeclNode> parseEnumDecl();
+    EnumeratorNode parseEnumerator(long long &nextValue);
 
     // Statements.
     std::unique_ptr<BlockStmtNode> parseBlock();

@@ -7,10 +7,16 @@ rules enforced by the semantic analyzer (`src/sema.cpp`).
 ## Grammar
 
 ```bnf
-program      ::= function*
+program      ::= (aggregate_decl | enum_decl | function)*
 function     ::= type identifier "(" params? ")" block
 params       ::= param ("," param)*
 param        ::= type identifier
+
+aggregate_decl ::= ("struct" | "union") identifier "{" field_decl* "}" ";"
+field_decl     ::= type identifier ("[" int_lit "]")? ";"
+
+enum_decl    ::= "enum" identifier "{" enumerator ("," enumerator)* "}" ";"
+enumerator   ::= identifier ("=" int_lit)?
 
 block        ::= "{" statement* "}"
 
@@ -27,7 +33,7 @@ statement    ::= var_decl
 var_decl     ::= type identifier ("[" int_lit "]")? ("=" expression)? ";"
 assign_stmt  ::= lvalue "=" expression ";"
 call_stmt    ::= identifier "(" args? ")" ";"
-lvalue       ::= identifier | "*" unary | postfix "[" expression "]"
+lvalue       ::= identifier | "*" unary | postfix "[" expression "]" | postfix "." identifier
 
 if_stmt      ::= "if" "(" expression ")" block ("else" (if_stmt | block))?
 while_stmt   ::= "while" "(" expression ")" block
@@ -38,8 +44,15 @@ return_stmt  ::= "return" expression? ";"
 break_stmt   ::= "break" ";"
 continue_stmt ::= "continue" ";"
 
-type         ::= ("int" | "float" | "char" | "void") "*"*
+type         ::= ("int" | "float" | "char" | "void"
+                  | "struct" identifier | "union" identifier | "enum" identifier) "*"*
 ```
+
+A `struct`/`union`/`enum` tag reference (e.g. `struct Point` in `struct Point p;`
+or `struct Point makeOrigin()`) must name an already-declared aggregate —
+see [Structs, Unions, and Enums](#structs-unions-and-enums) below. Note
+that struct/union/enum *declarations* are top-level only, like functions;
+they can't be declared inside a function body.
 
 ### Concrete Examples
 
@@ -62,6 +75,37 @@ a braced body block.
 ```c
 int add(int a, int b) { return a + b; }
 void greet(char c) { printf("%c\n", c); }
+```
+
+**aggregate_decl / field_decl** — a `struct` or `union` tag name and a
+braced list of `type name;` fields. Top-level only, like a function; a
+field's type may reference any other struct/union regardless of
+declaration order (only a direct-self-reference by value is rejected — see
+[Structs, Unions, and Enums](#structs-unions-and-enums)).
+
+```c
+struct Point {
+    int x;
+    int y;
+};
+
+union Number {
+    int i;
+    float f;
+};
+```
+
+**enum_decl / enumerator** — a tag name and a comma-separated list of
+names, each optionally assigned an explicit `int` value; an enumerator
+without `= value` is one more than the previous (or `0` for the first).
+
+```c
+enum Color {
+    RED,        // 0
+    GREEN,      // 1
+    BLUE = 10,  // 10
+    INDIGO      // 11
+};
 ```
 
 **params / param** — a comma-separated list of `type name` pairs. The
@@ -114,10 +158,15 @@ x = x + 1;
 total = total + fi * fi;
 *p = 5;       // assigns through a pointer
 arr[2] = 5;   // assigns through an array/pointer index
+p.x = 5;      // assigns through a struct/union field
+pp->x = 5;    // assigns through a field of a pointed-to struct
 ```
 
 An array variable itself is **not** assignable as a whole (`arr = other;`
-is an error, matching C) — only individual elements via `arr[i] = ...`.
+is an error, matching C) — only individual elements via `arr[i] = ...`. A
+struct or union variable, in contrast, **is** assignable as a whole
+(`p2 = p1;` copies every field) — see
+[Structs, Unions, and Enums](#structs-unions-and-enums).
 
 **call_stmt** — a function call used as a statement; its return value is
 discarded. Used primarily for `printf` and other void-returning functions.
@@ -201,7 +250,7 @@ comparison   ::= additive (("<" | ">" | "<=" | ">=") additive)*
 additive     ::= multiplicative (("+" | "-") multiplicative)*
 multiplicative ::= unary (("*" | "/") unary)*
 unary        ::= ("!" | "-" | "&" | "*") unary | postfix
-postfix      ::= primary ("[" expression "]")*
+postfix      ::= primary ( "[" expression "]" | "." identifier | "->" identifier )*
 primary      ::= int_lit | float_lit | char_lit | string_lit
                | identifier
                | identifier "(" args? ")"
@@ -218,11 +267,14 @@ dereference operator rather than the binary `&&`/`*` operators — the parser
 disambiguates by position, not by lookahead, exactly as in real C grammars.
 `&x`, `*p`, and `**pp` are all valid unary expressions.
 
-`[` binds tighter than the prefix unary operators, so `*arr[i]` parses as
-`*(arr[i])` and `&arr[i]` as `&(arr[i])`, matching C. Indexing is its own
-grammar production rather than sugar for pointer arithmetic — there is no
-general `p + 1` pointer arithmetic via `+`/`-` yet (those operators still
-require numeric, non-pointer operands).
+`[`, `.`, and `->` all bind tighter than the prefix unary operators, so
+`*arr[i]` parses as `*(arr[i])`, `&arr[i]` as `&(arr[i])`, and `&p->x` as
+`&(p->x)`, matching C. `p->field` is desugared by the parser into
+`(*p).field` — there's no separate "arrow" AST node, so sema and codegen
+only ever need to handle the dot form. Indexing is its own grammar
+production rather than sugar for pointer arithmetic — there is no general
+`p + 1` pointer arithmetic via `+`/`-` (those operators still require
+numeric, non-pointer operands).
 
 ---
 
@@ -297,6 +349,80 @@ values[0] = 1;
 int *p = values;        // decays to int*
 int x = p[0];            // same element as values[0]
 int *q = &values[2];     // pointer to the third element
+```
+
+### Structs, Unions, and Enums
+
+A `Type` that names a struct or union carries that tag name alongside its
+kind (`include/ast.h`'s `Type::aggregateName()`), so two aggregate types
+are equal only when their tag names match. There are no anonymous
+structs/unions, no nested struct *definitions* (a field's type can
+reference any other already-declared-or-not-yet-declared struct/union by
+name, but you can't write a new `struct { ... }` body inline as a field's
+type), and no struct-literal initializer syntax (`struct Point p = {1, 2};`).
+
+- Struct and union fields are plain `type name;` declarations, optionally
+  array-sized, in a top-level `struct Tag { ... };` / `union Tag { ... };`.
+- **Structs are sequential**: each field gets its own storage, in
+  declaration order (an LLVM named struct type under the hood).
+- **Unions overlap**: every field lives at the same address, sized to fit
+  the largest one (there's no native LLVM union — codegen picks whichever
+  field's LLVM type has the largest `getTypeAllocSize` as the union's
+  storage type, queried from `llvm::DataLayout`, and every other field is
+  read/written at that same address through its own type).
+- `s.field` accesses a member of a struct/union value `s`; `p->field` is
+  the equivalent for a pointer `p` (sugar for `(*p).field`).
+- Struct/union **values are first-class**: a local variable, function
+  parameter, or return value of struct/union type holds (or copies) the
+  whole aggregate, the same way an `int` does — passing one to a function
+  or returning one gives the callee/caller an independent copy, not a
+  reference to the original. This falls out of LLVM's native
+  load/store/pass-by-value support for aggregate types; MiniC doesn't
+  special-case it with manual `memcpy`s.
+- A struct/union variable **is** assignable as a whole (`p2 = p1;` copies
+  every field) — unlike an array, a struct/union value really does have a
+  single well-defined width.
+- A field's type may reference another struct/union **regardless of
+  declaration order** (sema resolves every tag name before checking any
+  field, in two passes) — but a struct/union can't directly contain
+  itself by value (`struct Node { struct Node n; };` is infinite size);
+  only a pointer field can form a self-reference, the standard linked-data
+  idiom. Only the *direct* case is checked; a cycle spread across two or
+  more structs (`A` contains `B` by value, `B` contains `A` by value) is
+  only caught later, by codegen, and only if that cyclic type is actually
+  instantiated somewhere.
+- `enum Tag { A, B = 2, ... };` declares **plain `int` constants** (`A` is
+  `0`, an unadorned name after an explicit value is one more than the
+  previous), not a distinct enum type — `enum Tag` as a type reference is
+  just `int`. A variable can shadow an enum constant's name in a nested
+  scope, like any other identifier.
+- struct, union, and enum tags share one namespace (matching C): you can't
+  declare both `struct Foo` and `union Foo`.
+
+```c
+struct Point { int x; int y; };
+union Number { int i; float f; };
+enum Color { RED, GREEN, BLUE };
+
+struct Point makeOrigin() {
+    struct Point p;
+    p.x = 0;
+    p.y = 0;
+    return p;          // returns a copy
+}
+
+void move(struct Point *p, int dx, int dy) {
+    p->x = p->x + dx;  // (*p).x = (*p).x + dx
+    p->y = p->y + dy;
+}
+
+int main() {
+    struct Point a = makeOrigin();
+    struct Point b = a;   // whole-struct copy
+    move(&a, 1, 1);       // b is unaffected
+    int c = GREEN;        // c == 1
+    return 0;
+}
 ```
 
 ### Arithmetic Operators (+, -, *, /)
@@ -382,20 +508,28 @@ while (n) { ... }   // ok: exits when n == 0
 
 `include/ast.h` defines one node type per grammar construct:
 
-- `ProgramNode`, `FuncDefNode`, `ParamNode` — top-level structure
+- `ProgramNode` — holds three top-level lists: `aggregates`
+  (`AggregateDeclNode`, for both struct and union — `isUnion` tells them
+  apart), `enums` (`EnumDeclNode`), and `functions` (`FuncDefNode`)
+- `FuncDefNode`, `ParamNode`, `AggregateDeclNode`, `FieldNode`,
+  `EnumDeclNode`, `EnumeratorNode` — top-level structure
 - `BlockStmtNode`, `VarDeclStmtNode`, `AssignStmtNode`, `ExprStmtNode`,
   `IfStmtNode`, `WhileStmtNode`, `ForStmtNode`, `ReturnStmtNode`,
   `BreakStmtNode`, `ContinueStmtNode` — statements
 - `BinOpExprNode`, `UnaryOpExprNode`, `CallExprNode`, `IdentExprNode`,
-  `IndexExprNode`, `IntLitExprNode`, `FloatLitExprNode`, `CharLitExprNode`,
-  `StringLitExprNode` — expressions. `UnaryOpExprNode` covers `&`/`*`
-  (`UnaryOp::AddressOf`/`Deref`) as well as `-`/`!`. `IndexExprNode` holds
-  `base`/`index` sub-expressions for `arr[i]`.
+  `IndexExprNode`, `MemberExprNode`, `IntLitExprNode`, `FloatLitExprNode`,
+  `CharLitExprNode`, `StringLitExprNode` — expressions. `UnaryOpExprNode`
+  covers `&`/`*` (`UnaryOp::AddressOf`/`Deref`) as well as `-`/`!`.
+  `IndexExprNode` holds `base`/`index` sub-expressions for `arr[i]`.
+  `MemberExprNode` holds a `base` expression and a `field` name for
+  `base.field` — `base->field` is desugared at parse time into
+  `MemberExprNode{UnaryOpExprNode{Deref, base}, field}`, so this node only
+  ever represents the dot form.
 
 `AssignStmtNode::target` is a general lvalue expression (an `IdentExprNode`,
-a `UnaryOpExprNode{Deref, ...}`, or an `IndexExprNode`), not just a variable
-name, so that `*p = 5;`, `arr[i] = 5;`, and `x = 5;` all share the same AST
-shape.
+a `UnaryOpExprNode{Deref, ...}`, an `IndexExprNode`, or a `MemberExprNode`),
+not just a variable name, so that `*p = 5;`, `arr[i] = 5;`, `s.field = 5;`,
+and `x = 5;` all share the same AST shape.
 
 Every node implements `print(std::ostream&, int indent)`, used by the
 `--emit-ast` CLI flag to dump an indented tree, e.g.:

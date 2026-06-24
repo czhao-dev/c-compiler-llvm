@@ -243,6 +243,76 @@ int main() {
         assert(ast.find("Index") != std::string::npos);
     }
 
+    // Struct/union/enum declarations, member access (. and ->), and the
+    // function-return-type-vs-definition disambiguation at top level.
+    {
+        auto program = parseSource(
+            "struct Point {\n"
+            "    int x;\n"
+            "    int y;\n"
+            "};\n"
+            "\n"
+            "enum Color {\n"
+            "    RED,\n"
+            "    GREEN,\n"
+            "    BLUE = 10\n"
+            "};\n"
+            "\n"
+            "union Number {\n"
+            "    int i;\n"
+            "    float f;\n"
+            "};\n"
+            "\n"
+            "struct Point makeOrigin() {\n"
+            "    struct Point p;\n"
+            "    p.x = 0;\n"
+            "    return p;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    struct Point p = makeOrigin();\n"
+            "    struct Point *pp = &p;\n"
+            "    int x = pp->x;\n"
+            "    int c = GREEN;\n"
+            "    return x + c;\n"
+            "}\n");
+
+        assert(program.aggregates.size() == 2);
+        assert(program.enums.size() == 1);
+        assert(program.functions.size() == 2);
+
+        const auto *pointDecl = program.aggregates[0].get();
+        assert(pointDecl->name == "Point" && !pointDecl->isUnion && pointDecl->fields.size() == 2);
+        const auto *numberDecl = program.aggregates[1].get();
+        assert(numberDecl->name == "Number" && numberDecl->isUnion);
+
+        assert(program.enums[0]->enumerators.size() == 3);
+        assert(program.enums[0]->enumerators[2].name == "BLUE" && program.enums[0]->enumerators[2].value == 10);
+
+        // makeOrigin's return type is a struct reference, not a redefinition.
+        assert(program.functions[0]->name == "makeOrigin");
+        assert(program.functions[0]->returnType.isStruct());
+
+        const auto &mainBody = program.functions[1]->body->statements;
+        const auto *ppDecl = dynamic_cast<minic::VarDeclStmtNode *>(mainBody[1].get());
+        assert(ppDecl != nullptr && ppDecl->type.isPointer());
+
+        const auto *xDecl = dynamic_cast<minic::VarDeclStmtNode *>(mainBody[2].get());
+        const auto *member = dynamic_cast<minic::MemberExprNode *>(xDecl->init.get());
+        assert(member != nullptr && member->field == "x");
+        // `pp->x` desugars to `(*pp).x`.
+        const auto *deref = dynamic_cast<minic::UnaryOpExprNode *>(member->base.get());
+        assert(deref != nullptr && deref->op == minic::UnaryOp::Deref);
+
+        std::ostringstream out;
+        program.print(out);
+        const std::string ast = out.str();
+        assert(ast.find("Struct Point") != std::string::npos);
+        assert(ast.find("Union Number") != std::string::npos);
+        assert(ast.find("Enum Color") != std::string::npos);
+        assert(ast.find("Member x") != std::string::npos);
+    }
+
     // Syntax errors are reported with file:line:column.
     {
         bool threw = false;

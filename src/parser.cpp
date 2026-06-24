@@ -110,6 +110,10 @@ bool Parser::isTypeToken(TokenType type) const {
            type == TokenType::Void;
 }
 
+bool Parser::startsType(TokenType type) const {
+    return isTypeToken(type) || type == TokenType::Struct || type == TokenType::Union || type == TokenType::Enum;
+}
+
 Type Parser::tokenToType(TokenType type) const {
     switch (type) {
     case TokenType::Int: return Type::Int;
@@ -121,6 +125,49 @@ Type Parser::tokenToType(TokenType type) const {
     }
 }
 
+Type Parser::parseType() {
+    const Token &headTok = peek();
+    Type base;
+    if (headTok.type == TokenType::Struct || headTok.type == TokenType::Union) {
+        advance();
+        const Token &nameTok = expect(TokenType::Identifier, "expected struct/union tag name");
+        base = headTok.type == TokenType::Struct ? Type::namedStruct(nameTok.lexeme) : Type::namedUnion(nameTok.lexeme);
+    } else if (headTok.type == TokenType::Enum) {
+        advance();
+        expect(TokenType::Identifier, "expected enum tag name");
+        // Enum constants are plain ints (see Type's doc comment in ast.h),
+        // so an `enum Name` type reference is just `int`.
+        base = Type::Int;
+    } else if (isTypeToken(headTok.type)) {
+        advance();
+        base = tokenToType(headTok.type);
+    } else {
+        error(headTok, "expected a type");
+    }
+
+    while (match(TokenType::Star)) {
+        base = base.pointerTo();
+    }
+    return base;
+}
+
+Type Parser::parseArraySuffix(Type base) {
+    if (match(TokenType::LeftBracket)) {
+        const Token &sizeTok = expect(TokenType::IntLiteral, "expected array size");
+        expect(TokenType::RightBracket, "expected ']' after array size");
+        const long long size = std::stoll(sizeTok.lexeme);
+        // A Type's arrayLength of 0 means "not an array" (see Type::isArray
+        // in ast.h), so a literal size of 0 can't be represented as an
+        // array type at all — reject it here rather than silently parsing
+        // `int a[0];` as the scalar declaration `int a;`.
+        if (size <= 0) {
+            error(sizeTok, "array size must be a positive integer");
+        }
+        return base.arrayOf(static_cast<int>(size));
+    }
+    return base;
+}
+
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
@@ -128,21 +175,29 @@ Type Parser::tokenToType(TokenType type) const {
 ProgramNode Parser::parseProgram() {
     ProgramNode program;
     while (!check(TokenType::EndOfFile)) {
-        program.functions.push_back(parseFuncDef());
+        // A leading struct/union/enum keyword is only the start of a new
+        // *definition* when it's immediately followed by "tag {" — e.g.
+        // `struct Point makeOrigin() { ... }` is a function whose return
+        // type happens to reference a struct, not a struct definition, so
+        // this needs a 3rd token of lookahead beyond the dispatch tier 1/2
+        // ever needed.
+        const bool isDefinition = peek(2).type == TokenType::LeftBrace;
+        if (check(TokenType::Struct) && isDefinition) {
+            program.aggregates.push_back(parseAggregateDecl(/*isUnion=*/false));
+        } else if (check(TokenType::Union) && isDefinition) {
+            program.aggregates.push_back(parseAggregateDecl(/*isUnion=*/true));
+        } else if (check(TokenType::Enum) && isDefinition) {
+            program.enums.push_back(parseEnumDecl());
+        } else {
+            program.functions.push_back(parseFuncDef());
+        }
     }
     return program;
 }
 
 std::unique_ptr<FuncDefNode> Parser::parseFuncDef() {
     const Token &typeTok = peek();
-    if (!isTypeToken(typeTok.type)) {
-        error(typeTok, "expected a return type");
-    }
-    advance();
-    Type returnType = tokenToType(typeTok.type);
-    while (match(TokenType::Star)) {
-        returnType = returnType.pointerTo();
-    }
+    Type returnType = parseType();
 
     const Token &nameTok = expect(TokenType::Identifier, "expected function name");
     expect(TokenType::LeftParen, "expected '(' after function name");
@@ -163,16 +218,64 @@ std::unique_ptr<FuncDefNode> Parser::parseFuncDef() {
 
 ParamNode Parser::parseParam() {
     const Token &typeTok = peek();
-    if (!isTypeToken(typeTok.type)) {
-        error(typeTok, "expected parameter type");
-    }
-    advance();
-    Type type = tokenToType(typeTok.type);
-    while (match(TokenType::Star)) {
-        type = type.pointerTo();
-    }
+    Type type = parseType();
     const Token &nameTok = expect(TokenType::Identifier, "expected parameter name");
     return ParamNode{type, nameTok.lexeme, typeTok.location};
+}
+
+std::unique_ptr<AggregateDeclNode> Parser::parseAggregateDecl(bool isUnion) {
+    const Token &headTok = isUnion ? expect(TokenType::Union, "expected 'union'")
+                                    : expect(TokenType::Struct, "expected 'struct'");
+    const Token &nameTok = expect(TokenType::Identifier, "expected tag name");
+    expect(TokenType::LeftBrace, "expected '{' after tag name");
+
+    std::vector<FieldNode> fields;
+    while (!check(TokenType::RightBrace) && !check(TokenType::EndOfFile)) {
+        fields.push_back(parseFieldDecl());
+    }
+    expect(TokenType::RightBrace, "expected '}' after field list");
+    expect(TokenType::Semicolon, "expected ';' after struct/union declaration");
+
+    return std::make_unique<AggregateDeclNode>(headTok.location, nameTok.lexeme, std::move(fields), isUnion);
+}
+
+FieldNode Parser::parseFieldDecl() {
+    const Token &typeTok = peek();
+    Type type = parseType();
+    const Token &nameTok = expect(TokenType::Identifier, "expected field name");
+    type = parseArraySuffix(type);
+    expect(TokenType::Semicolon, "expected ';' after field declaration");
+    return FieldNode{type, nameTok.lexeme, typeTok.location};
+}
+
+std::unique_ptr<EnumDeclNode> Parser::parseEnumDecl() {
+    const Token &enumTok = expect(TokenType::Enum, "expected 'enum'");
+    const Token &nameTok = expect(TokenType::Identifier, "expected enum tag name");
+    expect(TokenType::LeftBrace, "expected '{' after enum tag name");
+
+    std::vector<EnumeratorNode> enumerators;
+    long long nextValue = 0;
+    if (!check(TokenType::RightBrace)) {
+        enumerators.push_back(parseEnumerator(nextValue));
+        while (match(TokenType::Comma)) {
+            enumerators.push_back(parseEnumerator(nextValue));
+        }
+    }
+    expect(TokenType::RightBrace, "expected '}' after enumerator list");
+    expect(TokenType::Semicolon, "expected ';' after enum declaration");
+
+    return std::make_unique<EnumDeclNode>(enumTok.location, nameTok.lexeme, std::move(enumerators));
+}
+
+EnumeratorNode Parser::parseEnumerator(long long &nextValue) {
+    const Token &nameTok = expect(TokenType::Identifier, "expected enumerator name");
+    long long value = nextValue;
+    if (match(TokenType::Assign)) {
+        const Token &valueTok = expect(TokenType::IntLiteral, "expected integer constant");
+        value = std::stoll(valueTok.lexeme);
+    }
+    nextValue = value + 1;
+    return EnumeratorNode{nameTok.lexeme, value, nameTok.location};
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +298,9 @@ StmtPtr Parser::parseStatement() {
     case TokenType::Float:
     case TokenType::Char:
     case TokenType::Void:
+    case TokenType::Struct:
+    case TokenType::Union:
+    case TokenType::Enum:
         return parseVarDecl();
     case TokenType::If:
         return parseIf();
@@ -217,26 +323,10 @@ StmtPtr Parser::parseStatement() {
 }
 
 std::unique_ptr<VarDeclStmtNode> Parser::parseVarDeclNoSemi() {
-    const Token &typeTok = advance();
-    Type type = tokenToType(typeTok.type);
-    while (match(TokenType::Star)) {
-        type = type.pointerTo();
-    }
+    const Token &typeTok = peek();
+    Type type = parseType();
     const Token &nameTok = expect(TokenType::Identifier, "expected variable name");
-
-    if (match(TokenType::LeftBracket)) {
-        const Token &sizeTok = expect(TokenType::IntLiteral, "expected array size");
-        expect(TokenType::RightBracket, "expected ']' after array size");
-        const long long size = std::stoll(sizeTok.lexeme);
-        // A Type's arrayLength of 0 means "not an array" (see Type::isArray
-        // in ast.h), so a literal size of 0 can't be represented as an
-        // array type at all — reject it here rather than silently parsing
-        // `int a[0];` as the scalar declaration `int a;`.
-        if (size <= 0) {
-            error(sizeTok, "array size must be a positive integer");
-        }
-        type = type.arrayOf(static_cast<int>(size));
-    }
+    type = parseArraySuffix(type);
 
     ExprPtr init;
     if (match(TokenType::Assign)) {
@@ -340,7 +430,7 @@ StmtPtr Parser::parseFor() {
 }
 
 StmtPtr Parser::parseForInit() {
-    if (isTypeToken(peek().type)) {
+    if (startsType(peek().type)) {
         return parseVarDeclNoSemi();
     }
     return parseAssignNoSemi();
@@ -376,7 +466,8 @@ StmtPtr Parser::parseContinue() {
 // Expressions
 //
 // Precedence, lowest to highest: || , && , == != , < > <= >= , + - , * / ,
-// unary ! - & * (address-of / deref), postfix [] (indexing), primary.
+// unary ! - & * (address-of / deref), postfix [] . -> (indexing / member
+// access), primary.
 // ---------------------------------------------------------------------------
 
 ExprPtr Parser::parseExpression() {
@@ -472,11 +563,26 @@ ExprPtr Parser::parseUnary() {
 
 ExprPtr Parser::parsePostfix() {
     ExprPtr expr = parsePrimary();
-    while (check(TokenType::LeftBracket)) {
-        const Token &bracketTok = advance();
-        ExprPtr index = parseExpression();
-        expect(TokenType::RightBracket, "expected ']' after array index");
-        expr = std::make_unique<IndexExprNode>(bracketTok.location, std::move(expr), std::move(index));
+    while (true) {
+        if (check(TokenType::LeftBracket)) {
+            const Token &bracketTok = advance();
+            ExprPtr index = parseExpression();
+            expect(TokenType::RightBracket, "expected ']' after array index");
+            expr = std::make_unique<IndexExprNode>(bracketTok.location, std::move(expr), std::move(index));
+        } else if (check(TokenType::Dot)) {
+            const Token &dotTok = advance();
+            const Token &fieldTok = expect(TokenType::Identifier, "expected field name after '.'");
+            expr = std::make_unique<MemberExprNode>(dotTok.location, std::move(expr), fieldTok.lexeme);
+        } else if (check(TokenType::Arrow)) {
+            const Token &arrowTok = advance();
+            const Token &fieldTok = expect(TokenType::Identifier, "expected field name after '->'");
+            // Desugar `p->field` to `(*p).field` — see MemberExprNode's
+            // doc comment in ast.h.
+            auto deref = std::make_unique<UnaryOpExprNode>(arrowTok.location, UnaryOp::Deref, std::move(expr));
+            expr = std::make_unique<MemberExprNode>(arrowTok.location, std::move(deref), fieldTok.lexeme);
+        } else {
+            break;
+        }
     }
     return expr;
 }

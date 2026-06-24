@@ -17,6 +17,9 @@ enum class TokenType {
     Return,
     Break,
     Continue,
+    Struct,
+    Union,
+    Enum,
     Identifier,
     IntLiteral,
     FloatLiteral,
@@ -45,6 +48,8 @@ enum class TokenType {
     RightBracket,
     Semicolon,
     Comma,
+    Dot,
+    Arrow,
     EndOfFile,
 };
 

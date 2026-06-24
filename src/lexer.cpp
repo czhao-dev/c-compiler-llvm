@@ -21,6 +21,9 @@ const std::unordered_map<std::string, TokenType> kKeywords = {
     {"return", TokenType::Return},
     {"break", TokenType::Break},
     {"continue", TokenType::Continue},
+    {"struct", TokenType::Struct},
+    {"union", TokenType::Union},
+    {"enum", TokenType::Enum},
 };
 
 bool isIdentifierStart(char ch) {
@@ -46,6 +49,9 @@ std::string tokenTypeName(TokenType type) {
     case TokenType::Return: return "TOK_RETURN";
     case TokenType::Break: return "TOK_BREAK";
     case TokenType::Continue: return "TOK_CONTINUE";
+    case TokenType::Struct: return "TOK_STRUCT";
+    case TokenType::Union: return "TOK_UNION";
+    case TokenType::Enum: return "TOK_ENUM";
     case TokenType::Identifier: return "TOK_IDENT";
     case TokenType::IntLiteral: return "TOK_INT_LIT";
     case TokenType::FloatLiteral: return "TOK_FLOAT_LIT";
@@ -74,6 +80,8 @@ std::string tokenTypeName(TokenType type) {
     case TokenType::RightBracket: return "TOK_RBRACKET";
     case TokenType::Semicolon: return "TOK_SEMI";
     case TokenType::Comma: return "TOK_COMMA";
+    case TokenType::Dot: return "TOK_DOT";
+    case TokenType::Arrow: return "TOK_ARROW";
     case TokenType::EndOfFile: return "TOK_EOF";
     }
     return "TOK_UNKNOWN";
@@ -123,7 +131,11 @@ Token Lexer::nextToken() {
 
     switch (ch) {
     case '+': return makeToken(TokenType::Plus, "+", startLine, startColumn);
-    case '-': return makeToken(TokenType::Minus, "-", startLine, startColumn);
+    case '-':
+        if (match('>')) {
+            return makeToken(TokenType::Arrow, "->", startLine, startColumn);
+        }
+        return makeToken(TokenType::Minus, "-", startLine, startColumn);
     case '*': return makeToken(TokenType::Star, "*", startLine, startColumn);
     case '/': return makeToken(TokenType::Slash, "/", startLine, startColumn);
     case '=': {
@@ -168,6 +180,7 @@ Token Lexer::nextToken() {
     case ']': return makeToken(TokenType::RightBracket, "]", startLine, startColumn);
     case ';': return makeToken(TokenType::Semicolon, ";", startLine, startColumn);
     case ',': return makeToken(TokenType::Comma, ",", startLine, startColumn);
+    case '.': return makeToken(TokenType::Dot, ".", startLine, startColumn);
     case '\'': return lexCharLiteral(startLine, startColumn);
     case '"': return lexStringLiteral(startLine, startColumn);
     default:

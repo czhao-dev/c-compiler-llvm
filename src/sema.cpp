@@ -1,6 +1,7 @@
 #include "sema.h"
 
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace minic {
@@ -19,6 +20,11 @@ bool isLValueExpr(const ExprNode &expr) {
     }
     if (dynamic_cast<const IndexExprNode *>(&expr)) {
         return true;
+    }
+    if (const auto *member = dynamic_cast<const MemberExprNode *>(&expr)) {
+        // `s.field` is an lvalue exactly when `s` is (you can't assign into
+        // a field of a temporary, e.g. `getPoint().x = 1;`).
+        return isLValueExpr(*member->base);
     }
     return false;
 }
@@ -87,11 +93,15 @@ void SemanticAnalyzer::warning(SourceLocation location, std::string message) {
 std::vector<Diagnostic> SemanticAnalyzer::analyze(const ProgramNode &program) {
     diagnostics_.clear();
     functions_.clear();
+    aggregates_.clear();
+    tagNames_.clear();
+    enumConstants_.clear();
 
     // printf is a built-in: it accepts any argument types and returns int,
     // matching the C standard library signature.
     functions_.emplace("printf", FunctionSignature{Type::Int, {}, /*isVariadic=*/true});
 
+    collectTypeDeclarations(program);
     collectSignatures(program);
 
     for (const auto &func : program.functions) {
@@ -99,6 +109,90 @@ std::vector<Diagnostic> SemanticAnalyzer::analyze(const ProgramNode &program) {
     }
 
     return std::move(diagnostics_);
+}
+
+void SemanticAnalyzer::collectTypeDeclarations(const ProgramNode &program) {
+    // Phase 1: register every tag name first, so a field can reference any
+    // other struct/union/enum regardless of source order (mirrors how
+    // collectSignatures lets functions call each other regardless of
+    // order).
+    for (const auto &aggregate : program.aggregates) {
+        if (tagNames_.count(aggregate->name) > 0) {
+            error(aggregate->location, "redefinition of '" + aggregate->name + "'");
+            continue;
+        }
+        tagNames_.emplace(aggregate->name, aggregate->location);
+        aggregates_.emplace(aggregate->name, AggregateInfo{{}, aggregate->isUnion});
+    }
+    for (const auto &enumDecl : program.enums) {
+        if (tagNames_.count(enumDecl->name) > 0) {
+            error(enumDecl->location, "redefinition of '" + enumDecl->name + "'");
+            continue;
+        }
+        tagNames_.emplace(enumDecl->name, enumDecl->location);
+    }
+
+    // Phase 2: resolve each aggregate's field types and each enum's
+    // constants, now that every tag name is visible. A duplicate tag name
+    // was already reported in phase 1 and has no entry in aggregates_ to
+    // append to, so skip every occurrence but the first.
+    std::unordered_set<std::string> definedAggregates;
+    for (const auto &aggregate : program.aggregates) {
+        if (definedAggregates.insert(aggregate->name).second) {
+            checkAggregateFields(*aggregate);
+        }
+    }
+    for (const auto &enumDecl : program.enums) {
+        for (const auto &enumerator : enumDecl->enumerators) {
+            if (enumConstants_.count(enumerator.name) > 0) {
+                error(enumerator.location, "redefinition of '" + enumerator.name + "'");
+                continue;
+            }
+            enumConstants_.emplace(enumerator.name, enumerator.value);
+        }
+    }
+}
+
+void SemanticAnalyzer::checkAggregateFields(const AggregateDeclNode &decl) {
+    AggregateInfo &info = aggregates_.at(decl.name);
+    for (const auto &field : decl.fields) {
+        checkTypeIsValid(field.location, field.type);
+
+        if (field.type.elementType() == Type::Void) {
+            error(field.location, "field '" + field.name + "' cannot have type 'void'");
+        }
+
+        // A struct/union can't contain itself by value (infinite size);
+        // only a pointer (or, transitively, a pointer anywhere in a
+        // multi-struct cycle) breaks the recursion. Only the direct case
+        // is checked here — see AggregateDeclNode's doc comment in ast.h.
+        if (field.type.isAggregate() && field.type.aggregateName() == decl.name && !field.type.isPointer()) {
+            error(field.location, "field '" + field.name + "' directly contains '" + typeName(field.type) +
+                                       "', which would have infinite size");
+        }
+
+        bool duplicate = false;
+        for (const auto &existing : info.fields) {
+            if (existing.first == field.name) {
+                error(field.location, "duplicate field '" + field.name + "' in '" + decl.name + "'");
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            info.fields.emplace_back(field.name, field.type);
+        }
+    }
+}
+
+void SemanticAnalyzer::checkTypeIsValid(const SourceLocation &location, Type type) {
+    if (!type.isAggregate()) {
+        return;
+    }
+    if (aggregates_.count(type.aggregateName()) == 0) {
+        error(location, "use of undeclared " + std::string(type.isUnion() ? "union" : "struct") + " '" +
+                             type.aggregateName() + "'");
+    }
 }
 
 void SemanticAnalyzer::collectSignatures(const ProgramNode &program) {
@@ -125,9 +219,12 @@ void SemanticAnalyzer::checkFunction(const FuncDefNode &func) {
     currentFunction_ = &func;
     loopDepth_ = 0;
 
+    checkTypeIsValid(func.location, func.returnType);
+
     symbols_.enterScope();
 
     for (const auto &param : func.params) {
+        checkTypeIsValid(param.location, param.type);
         if (param.type == Type::Void) {
             error(param.location, "parameter '" + param.name + "' cannot have type 'void'");
             continue;
@@ -180,6 +277,7 @@ void SemanticAnalyzer::checkStmt(const StmtNode &stmt) {
 }
 
 void SemanticAnalyzer::checkVarDecl(const VarDeclStmtNode &decl) {
+    checkTypeIsValid(decl.location, decl.type);
     if (decl.type.elementType() == Type::Void) {
         error(decl.location, "variable '" + decl.name + "' cannot have type 'void'");
     }
@@ -316,19 +414,29 @@ Type SemanticAnalyzer::checkExpr(const ExprNode &expr) {
     if (const auto *index = dynamic_cast<const IndexExprNode *>(&expr)) {
         return checkIndex(*index);
     }
+    if (const auto *member = dynamic_cast<const MemberExprNode *>(&expr)) {
+        return checkMember(*member);
+    }
     return Type::Int;
 }
 
 Type SemanticAnalyzer::checkIdent(const IdentExprNode &expr) {
     const Type *type = symbols_.lookup(expr.name);
-    if (!type) {
-        error(expr.location, "use of undeclared variable '" + expr.name + "'");
+    if (type) {
+        // An array decays to a pointer to its first element whenever it's
+        // read as a value (matching C); the array's own storage is only
+        // exposed through emitLValue, e.g. for indexing or passing it to a
+        // function.
+        return type->isArray() ? type->decay() : *type;
+    }
+    // A variable can shadow an enum constant from an enclosing scope (they
+    // share C's "ordinary identifier" namespace), so the scoped lookup
+    // above must run first.
+    if (enumConstants_.count(expr.name) > 0) {
         return Type::Int;
     }
-    // An array decays to a pointer to its first element whenever it's read
-    // as a value (matching C); the array's own storage is only exposed
-    // through emitLValue, e.g. for indexing or passing it to a function.
-    return type->isArray() ? type->decay() : *type;
+    error(expr.location, "use of undeclared variable '" + expr.name + "'");
+    return Type::Int;
 }
 
 Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
@@ -469,6 +577,32 @@ Type SemanticAnalyzer::checkIndex(const IndexExprNode &expr) {
         return Type::Int;
     }
     return element;
+}
+
+Type SemanticAnalyzer::checkMember(const MemberExprNode &expr) {
+    const Type baseType = checkExpr(*expr.base);
+    if (!baseType.isAggregate()) {
+        error(expr.location, "member reference base type '" + typeName(baseType) + "' is not a struct or union");
+        return Type::Int;
+    }
+
+    // checkTypeIsValid (run when the base variable was declared) guarantees
+    // this lookup succeeds for any program that reaches this point cleanly;
+    // if it didn't, the missing-tag error has already been reported and
+    // there's nothing more useful to say about the member access itself.
+    auto it = aggregates_.find(baseType.aggregateName());
+    if (it == aggregates_.end()) {
+        return Type::Int;
+    }
+
+    for (const auto &field : it->second.fields) {
+        if (field.first == expr.field) {
+            return field.second;
+        }
+    }
+
+    error(expr.location, "no member named '" + expr.field + "' in '" + typeName(baseType) + "'");
+    return Type::Int;
 }
 
 void SemanticAnalyzer::checkAssignable(const SourceLocation &location, Type target, Type value,

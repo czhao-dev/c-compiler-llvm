@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -100,6 +101,15 @@ struct TypedValue {
     Type type = Type::Void;
 };
 
+// Ordered (name, type) fields of a struct or union, keyed by tag name —
+// codegen's counterpart to SemanticAnalyzer::AggregateInfo. A field's index
+// in `fields` is also its LLVM struct GEP index for struct kinds; unions
+// don't need an index since every field lives at the same address.
+struct AggregateInfo {
+    std::vector<std::pair<std::string, Type>> fields;
+    bool isUnion = false;
+};
+
 // A storage location: `address` points to a slot holding a value of `type`.
 // Produced for the target of an assignment or the operand of `&`.
 struct LValue {
@@ -116,6 +126,8 @@ public:
     }
 
     std::string generate() {
+        collectAggregates();
+        collectEnumConstants();
         collectSignatures();
         declarePrintf();
         declareFunctions();
@@ -153,6 +165,75 @@ private:
         }
     }
 
+    void collectAggregates() {
+        for (const auto &aggregate : program_.aggregates) {
+            if (aggregateInfo_.count(aggregate->name) > 0) {
+                continue; // duplicate tag; sema already reported this.
+            }
+            AggregateInfo info;
+            info.isUnion = aggregate->isUnion;
+            for (const auto &field : aggregate->fields) {
+                info.fields.emplace_back(field.name, field.type);
+            }
+            aggregateInfo_.emplace(aggregate->name, std::move(info));
+        }
+    }
+
+    void collectEnumConstants() {
+        for (const auto &enumDecl : program_.enums) {
+            for (const auto &enumerator : enumDecl->enumerators) {
+                enumConstants_.emplace(enumerator.name, enumerator.value);
+            }
+        }
+    }
+
+    // Builds (and memoizes) the LLVM type used to store a value of the
+    // named struct/union: a real llvm::StructType for a struct, or simply
+    // the largest field's own type for a union (every union field lives at
+    // the same address, so storage just needs to be big enough for all of
+    // them — there's no native LLVM union). Recurses into any by-value
+    // aggregate field via toLLVMType, in dependency order, regardless of
+    // declaration order; `building_` turns an undetected multi-struct
+    // by-value cycle (sema only catches direct self-containment) into a
+    // clean error instead of infinite recursion.
+    llvm::Type *buildAggregateStorageType(const std::string &name) {
+        auto cached = aggregateStorageTypes_.find(name);
+        if (cached != aggregateStorageTypes_.end()) {
+            return cached->second;
+        }
+        if (!building_.insert(name).second) {
+            throw std::runtime_error("struct/union '" + name +
+                                     "' has a cyclic by-value layout (only a pointer field can form a cycle)");
+        }
+
+        const AggregateInfo &info = aggregateInfo_.at(name);
+        std::vector<llvm::Type *> fieldTypes;
+        fieldTypes.reserve(info.fields.size());
+        for (const auto &field : info.fields) {
+            fieldTypes.push_back(toLLVMType(field.second));
+        }
+
+        llvm::Type *result = llvm::Type::getInt8Ty(context_);
+        if (info.isUnion) {
+            uint64_t bestSize = 0;
+            for (llvm::Type *fieldType : fieldTypes) {
+                const uint64_t size = module_->getDataLayout().getTypeAllocSize(fieldType);
+                if (size > bestSize) {
+                    bestSize = size;
+                    result = fieldType;
+                }
+            }
+        } else {
+            auto *structType = llvm::StructType::create(context_, "struct." + name);
+            structType->setBody(fieldTypes);
+            result = structType;
+        }
+
+        building_.erase(name);
+        aggregateStorageTypes_.emplace(name, result);
+        return result;
+    }
+
     llvm::Type *toLLVMType(Type type) {
         if (type.isArray()) {
             return llvm::ArrayType::get(toLLVMType(type.elementType()), type.arrayLength());
@@ -160,12 +241,16 @@ private:
         if (type.isPointer()) {
             return llvm::PointerType::getUnqual(context_);
         }
+        if (type.isAggregate()) {
+            return buildAggregateStorageType(type.aggregateName());
+        }
         switch (type.kind()) {
         case TypeKind::Int: return llvm::Type::getInt32Ty(context_);
         case TypeKind::Float: return llvm::Type::getFloatTy(context_);
         case TypeKind::Char: return llvm::Type::getInt8Ty(context_);
         case TypeKind::Void: return llvm::Type::getVoidTy(context_);
         case TypeKind::String: return llvm::PointerType::getUnqual(context_);
+        default: break;
         }
         return llvm::Type::getVoidTy(context_);
     }
@@ -232,8 +317,11 @@ private:
     }
 
     llvm::Constant *defaultValue(Type type) {
-        if (type.isArray()) {
-            return llvm::ConstantAggregateZero::get(toLLVMType(type));
+        if (type.isArray() || type.isAggregate()) {
+            // getNullValue (rather than ConstantAggregateZero) since a
+            // union's storage type may turn out to be scalar (e.g. its
+            // largest field is a plain int), not necessarily an aggregate.
+            return llvm::Constant::getNullValue(toLLVMType(type));
         }
         if (type.isPointer()) {
             return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
@@ -244,6 +332,7 @@ private:
         case TypeKind::Char: return llvm::ConstantInt::get(toLLVMType(type), 0, true);
         case TypeKind::Void: return nullptr;
         case TypeKind::String: return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
+        default: break;
         }
         return nullptr;
     }
@@ -491,6 +580,10 @@ private:
             LValue lv = emitLValue(expr);
             return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "idxload"), lv.type};
         }
+        if (dynamic_cast<const MemberExprNode *>(&expr)) {
+            LValue lv = emitLValue(expr);
+            return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "memberload"), lv.type};
+        }
 
         throw std::runtime_error(locationString(expr.location) + ": unsupported expression in codegen");
     }
@@ -498,6 +591,10 @@ private:
     TypedValue emitIdent(const IdentExprNode &expr) {
         const Variable *variable = lookupVariable(expr.name);
         if (!variable) {
+            auto enumIt = enumConstants_.find(expr.name);
+            if (enumIt != enumConstants_.end()) {
+                return {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), enumIt->second, true), Type::Int};
+            }
             throw std::runtime_error(locationString(expr.location) + ": unknown variable '" + expr.name + "'");
         }
 
@@ -538,6 +635,26 @@ private:
             llvm::Value *addr =
                 builder_.CreateInBoundsGEP(toLLVMType(element), base.value, idxValue, "idxaddr");
             return {addr, element};
+        }
+        if (const auto *member = dynamic_cast<const MemberExprNode *>(&expr)) {
+            LValue baseLV = emitLValue(*member->base);
+            const AggregateInfo &info = aggregateInfo_.at(baseLV.type.aggregateName());
+            for (std::size_t i = 0; i < info.fields.size(); ++i) {
+                if (info.fields[i].first != member->field) {
+                    continue;
+                }
+                const Type fieldType = info.fields[i].second;
+                if (info.isUnion) {
+                    // Every union field lives at the same address.
+                    return {baseLV.address, fieldType};
+                }
+                auto *structType = llvm::cast<llvm::StructType>(toLLVMType(baseLV.type));
+                llvm::Value *addr =
+                    builder_.CreateStructGEP(structType, baseLV.address, static_cast<unsigned>(i), "fieldaddr");
+                return {addr, fieldType};
+            }
+            throw std::runtime_error(locationString(expr.location) + ": unknown field '" + member->field +
+                                     "' in codegen");
         }
         throw std::runtime_error(locationString(expr.location) + ": expression is not assignable in codegen");
     }
@@ -844,6 +961,10 @@ private:
     std::unique_ptr<llvm::Module> module_;
     llvm::IRBuilder<> builder_;
     std::unordered_map<std::string, FunctionSignature> functions_;
+    std::unordered_map<std::string, AggregateInfo> aggregateInfo_;
+    std::unordered_map<std::string, llvm::Type *> aggregateStorageTypes_;
+    std::unordered_set<std::string> building_;
+    std::unordered_map<std::string, long long> enumConstants_;
     std::vector<std::unordered_map<std::string, Variable>> scopes_;
     std::vector<llvm::BasicBlock *> breakTargets_;
     std::vector<llvm::BasicBlock *> continueTargets_;
