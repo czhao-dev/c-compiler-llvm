@@ -3,6 +3,7 @@
 #include "token.h"
 
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -109,6 +110,15 @@ enum class BinaryOp {
     Geq,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    // The comma operator: evaluates lhs for its side effects, discards the
+    // result, then evaluates and yields rhs. Only reachable via an
+    // explicitly parenthesized "(a, b)" — see Parser::parsePrimary.
+    Comma,
 };
 
 enum class UnaryOp {
@@ -116,6 +126,7 @@ enum class UnaryOp {
     Not,
     AddressOf,
     Deref,
+    BitNot,
 };
 
 std::string binaryOpSymbol(BinaryOp op);
@@ -239,6 +250,31 @@ public:
     std::vector<ExprPtr> args;
 };
 
+// `condition ? thenExpr : elseExpr`.
+class TernaryExprNode : public ExprNode {
+public:
+    TernaryExprNode(SourceLocation location, ExprPtr condition, ExprPtr thenExpr, ExprPtr elseExpr);
+    void print(std::ostream &out, int indent) const override;
+
+    ExprPtr condition;
+    ExprPtr thenExpr;
+    ExprPtr elseExpr;
+};
+
+// `++target`/`--target` (isPrefix) or `target++`/`target--` (!isPrefix).
+// A dedicated node rather than a UnaryOp variant because it both reads and
+// writes `target` (which must be an lvalue) and the prefix/postfix forms
+// differ in which value (new vs. old) the expression itself produces.
+class IncDecExprNode : public ExprNode {
+public:
+    IncDecExprNode(SourceLocation location, ExprPtr target, bool isIncrement, bool isPrefix);
+    void print(std::ostream &out, int indent) const override;
+
+    ExprPtr target;
+    bool isIncrement;
+    bool isPrefix;
+};
+
 // ---------------------------------------------------------------------------
 // Statements
 // ---------------------------------------------------------------------------
@@ -264,11 +300,18 @@ public:
 class AssignStmtNode : public StmtNode {
 public:
     AssignStmtNode(SourceLocation location, ExprPtr target, ExprPtr value);
+    AssignStmtNode(SourceLocation location, ExprPtr target, BinaryOp compoundOp, ExprPtr value);
     void print(std::ostream &out, int indent) const override;
 
-    // An lvalue expression: an IdentExprNode or a UnaryOpExprNode{Deref, ...}.
+    // An lvalue expression: an IdentExprNode, a UnaryOpExprNode{Deref, ...},
+    // an IndexExprNode, or a MemberExprNode.
     ExprPtr target;
     ExprPtr value;
+    // For `target op= value` (e.g. `+=`): the read-modify-write is
+    // `target = target <compoundOp> value`, but `target`'s *address* is
+    // only evaluated once (important when it has side effects, e.g.
+    // `arr[f()] += 1`) — see emitAssign. Empty for a plain `=`.
+    std::optional<BinaryOp> compoundOp;
 };
 
 class ExprStmtNode : public StmtNode {

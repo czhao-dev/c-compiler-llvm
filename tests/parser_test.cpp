@@ -313,6 +313,65 @@ int main() {
         assert(ast.find("Member x") != std::string::npos);
     }
 
+    // Bitwise operator precedence: "&" binds tighter than "^", which binds
+    // tighter than "|"; "<<"/">>" sit between comparison and additive.
+    {
+        auto program = parseSource(
+            "int main() {\n"
+            "    int x = 1 | 2 ^ 3 & 4;\n"
+            "    int y = 1 + 2 << 3;\n"
+            "    return x;\n"
+            "}\n");
+
+        const auto &body = program.functions[0]->body->statements;
+        const auto *xDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[0].get());
+        const auto *xOr = dynamic_cast<minic::BinOpExprNode *>(xDecl->init.get());
+        assert(xOr != nullptr && xOr->op == minic::BinaryOp::BitOr);
+        const auto *xXor = dynamic_cast<minic::BinOpExprNode *>(xOr->rhs.get());
+        assert(xXor != nullptr && xXor->op == minic::BinaryOp::BitXor);
+        assert(dynamic_cast<minic::BinOpExprNode *>(xXor->rhs.get())->op == minic::BinaryOp::BitAnd);
+
+        const auto *yDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[1].get());
+        const auto *yShl = dynamic_cast<minic::BinOpExprNode *>(yDecl->init.get());
+        assert(yShl != nullptr && yShl->op == minic::BinaryOp::Shl);
+        assert(dynamic_cast<minic::BinOpExprNode *>(yShl->lhs.get())->op == minic::BinaryOp::Add);
+    }
+
+    // Ternary, prefix/postfix increment, compound assignment, and the
+    // comma operator (only valid inside explicit parens).
+    {
+        auto program = parseSource(
+            "int main() {\n"
+            "    int a = 1;\n"
+            "    int b = a > 0 ? a : -a;\n"
+            "    a++;\n"
+            "    ++a;\n"
+            "    a += 2;\n"
+            "    int c = (a++, b++, a + b);\n"
+            "    return b;\n"
+            "}\n");
+
+        const auto &body = program.functions[0]->body->statements;
+        const auto *bDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[1].get());
+        assert(dynamic_cast<minic::TernaryExprNode *>(bDecl->init.get()) != nullptr);
+
+        const auto *postStmt = dynamic_cast<minic::ExprStmtNode *>(body[2].get());
+        const auto *postInc = dynamic_cast<minic::IncDecExprNode *>(postStmt->expr.get());
+        assert(postInc != nullptr && postInc->isIncrement && !postInc->isPrefix);
+
+        const auto *preStmt = dynamic_cast<minic::ExprStmtNode *>(body[3].get());
+        const auto *preInc = dynamic_cast<minic::IncDecExprNode *>(preStmt->expr.get());
+        assert(preInc != nullptr && preInc->isIncrement && preInc->isPrefix);
+
+        const auto *compound = dynamic_cast<minic::AssignStmtNode *>(body[4].get());
+        assert(compound != nullptr && compound->compoundOp.has_value() &&
+               *compound->compoundOp == minic::BinaryOp::Add);
+
+        const auto *cDecl = dynamic_cast<minic::VarDeclStmtNode *>(body[5].get());
+        const auto *outerComma = dynamic_cast<minic::BinOpExprNode *>(cDecl->init.get());
+        assert(outerComma != nullptr && outerComma->op == minic::BinaryOp::Comma);
+    }
+
     // Syntax errors are reported with file:line:column.
     {
         bool threw = false;

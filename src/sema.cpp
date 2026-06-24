@@ -11,6 +11,17 @@ bool isNumericType(Type type) {
     return type == Type::Int || type == Type::Float || type == Type::Char;
 }
 
+// Bitwise operators and ++/-- only accept integral operands in C — not
+// float, unlike the arithmetic operators.
+bool isIntegralType(Type type) {
+    return type == Type::Int || type == Type::Char;
+}
+
+bool isBitwiseOp(BinaryOp op) {
+    return op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor || op == BinaryOp::Shl ||
+           op == BinaryOp::Shr;
+}
+
 bool isLValueExpr(const ExprNode &expr) {
     if (dynamic_cast<const IdentExprNode *>(&expr)) {
         return true;
@@ -314,6 +325,17 @@ void SemanticAnalyzer::checkAssign(const AssignStmtNode &assign) {
         return;
     }
 
+    if (assign.compoundOp) {
+        // `target op= value` is `target = target op value`, but evaluates
+        // target's address only once — checkBinOpTypes here just combines
+        // the two types already computed above, it doesn't re-checkExpr
+        // the target.
+        const Type resultType = checkBinOpTypes(assign.location, *assign.compoundOp, targetType, valueType,
+                                                 nullptr, assign.value.get());
+        checkAssignable(assign.location, targetType, resultType, "compound assignment");
+        return;
+    }
+
     checkAssignable(assign.location, targetType, valueType, "assignment", assign.value.get());
 }
 
@@ -417,6 +439,12 @@ Type SemanticAnalyzer::checkExpr(const ExprNode &expr) {
     if (const auto *member = dynamic_cast<const MemberExprNode *>(&expr)) {
         return checkMember(*member);
     }
+    if (const auto *ternary = dynamic_cast<const TernaryExprNode *>(&expr)) {
+        return checkTernary(*ternary);
+    }
+    if (const auto *incDec = dynamic_cast<const IncDecExprNode *>(&expr)) {
+        return checkIncDec(*incDec);
+    }
     return Type::Int;
 }
 
@@ -475,6 +503,25 @@ Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
         return pointee;
     }
 
+    if (expr.op == UnaryOp::BitNot) {
+        const Type operandType = checkExpr(*expr.operand);
+        if (!isIntegralType(operandType)) {
+            error(expr.location, "invalid operand to unary '~': '" + typeName(operandType) + "'");
+            return Type::Int;
+        }
+        return Type::Int;
+    }
+
+    if (expr.op == UnaryOp::Not) {
+        // `!p` is allowed for a pointer operand too — it's the negation of
+        // the same truthiness rule used by `if`/`while` (checkCondition).
+        const Type operandType = checkExpr(*expr.operand);
+        if (!isNumericType(operandType) && !operandType.isPointer()) {
+            error(expr.location, "invalid operand to unary '!': '" + typeName(operandType) + "'");
+        }
+        return Type::Int;
+    }
+
     const Type operandType = checkExpr(*expr.operand);
     if (!isNumericType(operandType)) {
         error(expr.location, "invalid operand to unary '" + unaryOpSymbol(expr.op) + "': '" +
@@ -484,38 +531,73 @@ Type SemanticAnalyzer::checkUnaryOp(const UnaryOpExprNode &expr) {
 
     switch (expr.op) {
     case UnaryOp::Negate: return operandType == Type::Float ? Type::Float : Type::Int;
-    case UnaryOp::Not: return Type::Int;
     default: break;
     }
     return Type::Int;
 }
 
 Type SemanticAnalyzer::checkBinOp(const BinOpExprNode &expr) {
+    if (expr.op == BinaryOp::Comma) {
+        checkExpr(*expr.lhs);
+        return checkExpr(*expr.rhs);
+    }
+
     const Type lhsType = checkExpr(*expr.lhs);
     const Type rhsType = checkExpr(*expr.rhs);
+    return checkBinOpTypes(expr.location, expr.op, lhsType, rhsType, expr.lhs.get(), expr.rhs.get());
+}
+
+// The type-combining half of checkBinOp, factored out so compound
+// assignment (`target op= value`) can reuse it with the target's and
+// value's *already-computed* types — it doesn't re-evaluate any
+// expression. `lhsExpr`/`rhsExpr` are only consulted for null-pointer-
+// constant detection and may be null when there's no corresponding
+// expression (e.g. compound assignment's synthetic "lhs").
+Type SemanticAnalyzer::checkBinOpTypes(const SourceLocation &location, BinaryOp op, Type lhsType, Type rhsType,
+                                        const ExprNode *lhsExpr, const ExprNode *rhsExpr) {
+    if (op == BinaryOp::And || op == BinaryOp::Or) {
+        // Each operand is independently converted to bool (same rule as
+        // checkCondition / unary '!'), so a pointer operand is fine even
+        // though it isn't "numeric".
+        const bool lhsOk = isNumericType(lhsType) || lhsType.isPointer();
+        const bool rhsOk = isNumericType(rhsType) || rhsType.isPointer();
+        if (!lhsOk || !rhsOk) {
+            error(location, "invalid operands to binary '" + binaryOpSymbol(op) + "': '" + typeName(lhsType) +
+                                 "' and '" + typeName(rhsType) + "'");
+        }
+        return Type::Int;
+    }
 
     if (lhsType.isPointer() || rhsType.isPointer()) {
-        const bool isEqOrNeq = expr.op == BinaryOp::Eq || expr.op == BinaryOp::Neq;
+        const bool isEqOrNeq = op == BinaryOp::Eq || op == BinaryOp::Neq;
         const bool samePointerType = lhsType == rhsType;
         const bool lhsNullAgainstPointer =
-            rhsType.isPointer() && lhsType == Type::Int && isNullPointerConstant(*expr.lhs);
+            rhsType.isPointer() && lhsType == Type::Int && lhsExpr && isNullPointerConstant(*lhsExpr);
         const bool rhsNullAgainstPointer =
-            lhsType.isPointer() && rhsType == Type::Int && isNullPointerConstant(*expr.rhs);
+            lhsType.isPointer() && rhsType == Type::Int && rhsExpr && isNullPointerConstant(*rhsExpr);
         if (isEqOrNeq && (samePointerType || lhsNullAgainstPointer || rhsNullAgainstPointer)) {
             return Type::Int;
         }
-        error(expr.location, "invalid operands to binary '" + binaryOpSymbol(expr.op) + "': '" +
-                                  typeName(lhsType) + "' and '" + typeName(rhsType) + "'");
+        error(location, "invalid operands to binary '" + binaryOpSymbol(op) + "': '" + typeName(lhsType) +
+                             "' and '" + typeName(rhsType) + "'");
+        return Type::Int;
+    }
+
+    if (isBitwiseOp(op)) {
+        if (!isIntegralType(lhsType) || !isIntegralType(rhsType)) {
+            error(location, "invalid operands to binary '" + binaryOpSymbol(op) + "': '" + typeName(lhsType) +
+                                 "' and '" + typeName(rhsType) + "'");
+        }
         return Type::Int;
     }
 
     if (!isNumericType(lhsType) || !isNumericType(rhsType)) {
-        error(expr.location, "invalid operands to binary '" + binaryOpSymbol(expr.op) + "': '" +
-                                  typeName(lhsType) + "' and '" + typeName(rhsType) + "'");
+        error(location, "invalid operands to binary '" + binaryOpSymbol(op) + "': '" + typeName(lhsType) +
+                             "' and '" + typeName(rhsType) + "'");
         return Type::Int;
     }
 
-    switch (expr.op) {
+    switch (op) {
     case BinaryOp::Add:
     case BinaryOp::Sub:
     case BinaryOp::Mul:
@@ -603,6 +685,49 @@ Type SemanticAnalyzer::checkMember(const MemberExprNode &expr) {
 
     error(expr.location, "no member named '" + expr.field + "' in '" + typeName(baseType) + "'");
     return Type::Int;
+}
+
+Type SemanticAnalyzer::checkTernary(const TernaryExprNode &expr) {
+    checkCondition(expr.condition->location, checkExpr(*expr.condition));
+
+    const Type thenType = checkExpr(*expr.thenExpr);
+    const Type elseType = checkExpr(*expr.elseExpr);
+
+    if (thenType == elseType) {
+        return thenType;
+    }
+    if (isNumericType(thenType) && isNumericType(elseType)) {
+        return (thenType == Type::Float || elseType == Type::Float) ? Type::Float : Type::Int;
+    }
+    // Let one branch be a null-pointer constant against a pointer branch,
+    // matching the rule for == / != and plain assignment.
+    if (thenType.isPointer() && elseType == Type::Int && isNullPointerConstant(*expr.elseExpr)) {
+        return thenType;
+    }
+    if (elseType.isPointer() && thenType == Type::Int && isNullPointerConstant(*expr.thenExpr)) {
+        return elseType;
+    }
+
+    error(expr.location, "incompatible operand types in ternary expression: '" + typeName(thenType) + "' and '" +
+                              typeName(elseType) + "'");
+    return thenType;
+}
+
+Type SemanticAnalyzer::checkIncDec(const IncDecExprNode &expr) {
+    const Type targetType = checkExpr(*expr.target);
+    const char *symbol = expr.isIncrement ? "++" : "--";
+
+    if (!isLValueExpr(*expr.target)) {
+        error(expr.location, "operand of '" + std::string(symbol) + "' is not assignable");
+        return targetType;
+    }
+    // Pointer ++/-- would be pointer arithmetic, which isn't supported yet
+    // (see the arithmetic-operators section of docs/language_spec.md).
+    if (!isNumericType(targetType)) {
+        error(expr.location, "invalid operand to '" + std::string(symbol) + "': '" + typeName(targetType) + "'");
+        return Type::Int;
+    }
+    return targetType;
 }
 
 void SemanticAnalyzer::checkAssignable(const SourceLocation &location, Type target, Type value,

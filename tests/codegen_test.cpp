@@ -81,6 +81,9 @@ int main() {
            "before: x=3 y=7\nafter: x=7 y=3\nincremented: 8\np is non-null\n");
     assert(compileAndRun(dir + "/array_sum.mc") == "0\n1\n4\n9\n16\nsum=30\n");
     assert(compileAndRun(dir + "/struct_point.mc") == "(5, 3)\n");
+    assert(compileAndRun(dir + "/bit_ops.mc") ==
+           "0 has 0 bits set\n7 has 3 bits set\n14 has 3 bits set\n21 has 3 bits set\n28 has 3 bits set\n"
+           "total=12\nclamped=12\n");
 
     const std::string fizz = compileAndRun(dir + "/fizzbuzz.mc");
     assert(fizz.substr(0, 2) == "1\n");

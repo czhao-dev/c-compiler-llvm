@@ -65,7 +65,7 @@ if(MINIC_ENABLE_LLVM AND LLVM_FOUND)
     find_program(CLANG_EXECUTABLE clang)
     if(CLANG_EXECUTABLE)
         set(_example_outputs)
-        foreach(prog fibonacci fizzbuzz gcd sum_of_squares pointer_swap array_sum struct_point)
+        foreach(prog fibonacci fizzbuzz gcd sum_of_squares pointer_swap array_sum struct_point bit_ops)
             add_custom_command(
                 OUTPUT ${CMAKE_BINARY_DIR}/${prog}_clang
                 COMMAND ${CLANG_EXECUTABLE} -x c -include stdio.h

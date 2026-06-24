@@ -62,6 +62,12 @@ std::string binaryOpSymbol(BinaryOp op) {
     case BinaryOp::Leq: return "<=";
     case BinaryOp::Geq: return ">=";
     case BinaryOp::And: return "&&";
+    case BinaryOp::BitAnd: return "&";
+    case BinaryOp::BitOr: return "|";
+    case BinaryOp::BitXor: return "^";
+    case BinaryOp::Shl: return "<<";
+    case BinaryOp::Shr: return ">>";
+    case BinaryOp::Comma: return ",";
     case BinaryOp::Or: return "||";
     }
     return "<unknown op>";
@@ -73,6 +79,7 @@ std::string unaryOpSymbol(UnaryOp op) {
     case UnaryOp::Not: return "!";
     case UnaryOp::AddressOf: return "&";
     case UnaryOp::Deref: return "*";
+    case UnaryOp::BitNot: return "~";
     }
     return "<unknown op>";
 }
@@ -170,6 +177,27 @@ void CallExprNode::print(std::ostream &out, int indent) const {
     }
 }
 
+TernaryExprNode::TernaryExprNode(SourceLocation location, ExprPtr condition, ExprPtr thenExpr, ExprPtr elseExpr)
+    : ExprNode(std::move(location)), condition(std::move(condition)), thenExpr(std::move(thenExpr)),
+      elseExpr(std::move(elseExpr)) {}
+
+void TernaryExprNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Ternary\n";
+    condition->print(out, indent + 1);
+    thenExpr->print(out, indent + 1);
+    elseExpr->print(out, indent + 1);
+}
+
+IncDecExprNode::IncDecExprNode(SourceLocation location, ExprPtr target, bool isIncrement, bool isPrefix)
+    : ExprNode(std::move(location)), target(std::move(target)), isIncrement(isIncrement), isPrefix(isPrefix) {}
+
+void IncDecExprNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << (isPrefix ? "Pre" : "Post") << (isIncrement ? "Inc" : "Dec") << '\n';
+    target->print(out, indent + 1);
+}
+
 // ---------------------------------------------------------------------------
 // Statements
 // ---------------------------------------------------------------------------
@@ -199,9 +227,16 @@ void VarDeclStmtNode::print(std::ostream &out, int indent) const {
 AssignStmtNode::AssignStmtNode(SourceLocation location, ExprPtr target, ExprPtr value)
     : StmtNode(std::move(location)), target(std::move(target)), value(std::move(value)) {}
 
+AssignStmtNode::AssignStmtNode(SourceLocation location, ExprPtr target, BinaryOp compoundOp, ExprPtr value)
+    : StmtNode(std::move(location)), target(std::move(target)), value(std::move(value)), compoundOp(compoundOp) {}
+
 void AssignStmtNode::print(std::ostream &out, int indent) const {
     printIndent(out, indent);
-    out << "Assign\n";
+    out << "Assign";
+    if (compoundOp) {
+        out << " " << binaryOpSymbol(*compoundOp) << "=";
+    }
+    out << '\n';
     target->print(out, indent + 1);
     value->print(out, indent + 1);
 }

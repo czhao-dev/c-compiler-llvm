@@ -72,7 +72,7 @@ int main() {
 
     // Every example program is well-typed: zero diagnostics.
     for (const std::string &name : {"fibonacci.mc", "gcd.mc", "fizzbuzz.mc", "sum_of_squares.mc",
-                                     "pointer_swap.mc", "array_sum.mc", "struct_point.mc"}) {
+                                     "pointer_swap.mc", "array_sum.mc", "struct_point.mc", "bit_ops.mc"}) {
         const auto diags = analyzeFile(examplesDir + "/" + name);
         if (!diags.empty()) {
             for (const auto &diag : diags) {
@@ -451,6 +451,77 @@ int main() {
                                           "union Foo { int y; };\n"
                                           "int main() { return 0; }\n");
         assert(hasError(diags, "redefinition of 'Foo'"));
+    }
+
+    // Bitwise/ternary/inc-dec/compound-assignment: well-typed cases.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int a = 5;\n"
+            "    int b = a & 1 | a ^ 2;\n"
+            "    int c = ~a << 1 >> 1;\n"
+            "    int d = a > b ? a : b;\n"
+            "    a++;\n"
+            "    --a;\n"
+            "    a += 1;\n"
+            "    a &= 1;\n"
+            "    int *p = &a;\n"
+            "    if (!p) { return 0; }\n"
+            "    int e = (a++, b++, a + b);\n"
+            "    return b + c + d + e;\n"
+            "}\n");
+        assert(diags.empty());
+    }
+
+    // Bitwise operators require integral (not float) operands.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    float f = 1.5;\n"
+                                          "    int x = f & 1;\n"
+                                          "    return x;\n"
+                                          "}\n");
+        assert(hasError(diags, "invalid operands to binary '&'"));
+    }
+
+    // '~' requires an integral (not float) operand.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    float f = 1.5;\n"
+                                          "    return ~f;\n"
+                                          "}\n");
+        assert(hasError(diags, "invalid operand to unary '~'"));
+    }
+
+    // ++/-- require an lvalue operand.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    int x = (1 + 2)++;\n"
+                                          "    return x;\n"
+                                          "}\n");
+        assert(hasError(diags, "operand of '++' is not assignable"));
+    }
+
+    // The two branches of a ternary must be compatible.
+    {
+        const auto diags = analyzeSource("struct P { int x; };\n"
+                                          "int main() {\n"
+                                          "    struct P p;\n"
+                                          "    int y = 1 ? p : 5;\n"
+                                          "    return y;\n"
+                                          "}\n");
+        assert(hasError(diags, "incompatible operand types in ternary expression"));
+    }
+
+    // Compound assignment on a pointer with a non-pointer operator is an
+    // error (no pointer arithmetic yet).
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    int x = 5;\n"
+                                          "    int *p = &x;\n"
+                                          "    p += 1;\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(hasError(diags, "invalid operands to binary '+'"));
     }
 
     // Redefinition of a function.

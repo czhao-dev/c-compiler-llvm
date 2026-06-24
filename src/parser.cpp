@@ -316,6 +316,8 @@ StmtPtr Parser::parseStatement() {
         return parseContinue();
     case TokenType::Identifier:
     case TokenType::Star:
+    case TokenType::PlusPlus:
+    case TokenType::MinusMinus:
         return parseAssignOrExprStmt();
     default:
         error(peek(), "expected a statement");
@@ -341,31 +343,71 @@ StmtPtr Parser::parseVarDecl() {
     return decl;
 }
 
-std::unique_ptr<AssignStmtNode> Parser::parseAssignNoSemi() {
-    const Token &startTok = peek();
-    ExprPtr target = parseUnary();
-    expect(TokenType::Assign, "expected '=' in assignment");
-    ExprPtr value = parseExpression();
-    return std::make_unique<AssignStmtNode>(startTok.location, std::move(target), std::move(value));
+bool Parser::isCompoundAssignToken(TokenType type) const {
+    switch (type) {
+    case TokenType::PlusAssign:
+    case TokenType::MinusAssign:
+    case TokenType::StarAssign:
+    case TokenType::SlashAssign:
+    case TokenType::AmpAssign:
+    case TokenType::PipeAssign:
+    case TokenType::CaretAssign:
+    case TokenType::ShlAssign:
+    case TokenType::ShrAssign:
+        return true;
+    default:
+        return false;
+    }
 }
 
-StmtPtr Parser::parseAssignOrExprStmt() {
+BinaryOp Parser::compoundAssignOp(TokenType type) const {
+    switch (type) {
+    case TokenType::PlusAssign: return BinaryOp::Add;
+    case TokenType::MinusAssign: return BinaryOp::Sub;
+    case TokenType::StarAssign: return BinaryOp::Mul;
+    case TokenType::SlashAssign: return BinaryOp::Div;
+    case TokenType::AmpAssign: return BinaryOp::BitAnd;
+    case TokenType::PipeAssign: return BinaryOp::BitOr;
+    case TokenType::CaretAssign: return BinaryOp::BitXor;
+    case TokenType::ShlAssign: return BinaryOp::Shl;
+    case TokenType::ShrAssign: return BinaryOp::Shr;
+    default:
+        throw std::logic_error("compoundAssignOp: token is not a compound-assignment operator");
+    }
+}
+
+StmtPtr Parser::parseSimpleStmtNoSemi() {
     const Token &startTok = peek();
     ExprPtr expr = parseUnary();
 
     if (check(TokenType::Assign)) {
         advance();
         ExprPtr value = parseExpression();
-        expect(TokenType::Semicolon, "expected ';' after assignment");
         return std::make_unique<AssignStmtNode>(startTok.location, std::move(expr), std::move(value));
     }
-
-    if (dynamic_cast<const CallExprNode *>(expr.get())) {
-        expect(TokenType::Semicolon, "expected ';' after expression statement");
-        return std::make_unique<ExprStmtNode>(startTok.location, std::move(expr));
+    if (isCompoundAssignToken(peek().type)) {
+        const Token &opTok = advance();
+        ExprPtr value = parseExpression();
+        return std::make_unique<AssignStmtNode>(startTok.location, std::move(expr), compoundAssignOp(opTok.type),
+                                                std::move(value));
     }
 
-    error(peek(), "expected '=' or '(' after expression");
+    return std::make_unique<ExprStmtNode>(startTok.location, std::move(expr));
+}
+
+StmtPtr Parser::parseAssignOrExprStmt() {
+    StmtPtr stmt = parseSimpleStmtNoSemi();
+    // A bare expression statement only makes sense if it has a side effect
+    // (a call, or ++/--); anything else (e.g. a stray `1 + 2;`) is silently
+    // pointless and almost always a typo for an assignment.
+    if (const auto *exprStmt = dynamic_cast<const ExprStmtNode *>(stmt.get())) {
+        if (!dynamic_cast<const CallExprNode *>(exprStmt->expr.get()) &&
+            !dynamic_cast<const IncDecExprNode *>(exprStmt->expr.get())) {
+            error(peek(), "expected '=' or '(' after expression");
+        }
+    }
+    expect(TokenType::Semicolon, "expected ';' after statement");
+    return stmt;
 }
 
 StmtPtr Parser::parseIf() {
@@ -433,11 +475,11 @@ StmtPtr Parser::parseForInit() {
     if (startsType(peek().type)) {
         return parseVarDeclNoSemi();
     }
-    return parseAssignNoSemi();
+    return parseSimpleStmtNoSemi();
 }
 
 StmtPtr Parser::parseForUpdate() {
-    return parseAssignNoSemi();
+    return parseSimpleStmtNoSemi();
 }
 
 StmtPtr Parser::parseReturn() {
@@ -465,13 +507,27 @@ StmtPtr Parser::parseContinue() {
 // ---------------------------------------------------------------------------
 // Expressions
 //
-// Precedence, lowest to highest: || , && , == != , < > <= >= , + - , * / ,
-// unary ! - & * (address-of / deref), postfix [] . -> (indexing / member
-// access), primary.
+// Precedence, lowest to highest: ?: , || , && , | , ^ , & , == != ,
+// < > <= >= , << >> , + - , * / , unary ! - & * ~ ++ -- (address-of /
+// deref / bitnot / pre-inc/dec), postfix [] . -> ++ -- (indexing / member
+// access / post-inc/dec), primary.
 // ---------------------------------------------------------------------------
 
 ExprPtr Parser::parseExpression() {
-    return parseLogicalOr();
+    return parseTernary();
+}
+
+ExprPtr Parser::parseTernary() {
+    ExprPtr condition = parseLogicalOr();
+    if (!check(TokenType::Question)) {
+        return condition;
+    }
+    const Token &questionTok = advance();
+    ExprPtr thenExpr = parseExpression();
+    expect(TokenType::Colon, "expected ':' in ternary expression");
+    ExprPtr elseExpr = parseTernary();
+    return std::make_unique<TernaryExprNode>(questionTok.location, std::move(condition), std::move(thenExpr),
+                                             std::move(elseExpr));
 }
 
 ExprPtr Parser::parseLogicalOr() {
@@ -485,11 +541,41 @@ ExprPtr Parser::parseLogicalOr() {
 }
 
 ExprPtr Parser::parseLogicalAnd() {
-    ExprPtr left = parseEquality();
+    ExprPtr left = parseBitwiseOr();
     while (check(TokenType::And)) {
         const Token &opTok = advance();
-        ExprPtr right = parseEquality();
+        ExprPtr right = parseBitwiseOr();
         left = std::make_unique<BinOpExprNode>(opTok.location, BinaryOp::And, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+ExprPtr Parser::parseBitwiseOr() {
+    ExprPtr left = parseBitwiseXor();
+    while (check(TokenType::Pipe)) {
+        const Token &opTok = advance();
+        ExprPtr right = parseBitwiseXor();
+        left = std::make_unique<BinOpExprNode>(opTok.location, BinaryOp::BitOr, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+ExprPtr Parser::parseBitwiseXor() {
+    ExprPtr left = parseBitwiseAnd();
+    while (check(TokenType::Caret)) {
+        const Token &opTok = advance();
+        ExprPtr right = parseBitwiseAnd();
+        left = std::make_unique<BinOpExprNode>(opTok.location, BinaryOp::BitXor, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+ExprPtr Parser::parseBitwiseAnd() {
+    ExprPtr left = parseEquality();
+    while (check(TokenType::Ampersand)) {
+        const Token &opTok = advance();
+        ExprPtr right = parseEquality();
+        left = std::make_unique<BinOpExprNode>(opTok.location, BinaryOp::BitAnd, std::move(left), std::move(right));
     }
     return left;
 }
@@ -506,7 +592,7 @@ ExprPtr Parser::parseEquality() {
 }
 
 ExprPtr Parser::parseComparison() {
-    ExprPtr left = parseAdditive();
+    ExprPtr left = parseShift();
     while (check(TokenType::Less) || check(TokenType::Greater) || check(TokenType::LessEqual) ||
            check(TokenType::GreaterEqual)) {
         const Token &opTok = advance();
@@ -517,6 +603,17 @@ ExprPtr Parser::parseComparison() {
         case TokenType::LessEqual: op = BinaryOp::Leq; break;
         default: op = BinaryOp::Geq; break;
         }
+        ExprPtr right = parseShift();
+        left = std::make_unique<BinOpExprNode>(opTok.location, op, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+ExprPtr Parser::parseShift() {
+    ExprPtr left = parseAdditive();
+    while (check(TokenType::LeftShift) || check(TokenType::RightShift)) {
+        const Token &opTok = advance();
+        const BinaryOp op = opTok.type == TokenType::LeftShift ? BinaryOp::Shl : BinaryOp::Shr;
         ExprPtr right = parseAdditive();
         left = std::make_unique<BinOpExprNode>(opTok.location, op, std::move(left), std::move(right));
     }
@@ -546,9 +643,14 @@ ExprPtr Parser::parseMultiplicative() {
 }
 
 ExprPtr Parser::parseUnary() {
-    if (check(TokenType::Not) || check(TokenType::Minus)) {
+    if (check(TokenType::Not) || check(TokenType::Minus) || check(TokenType::Tilde)) {
         const Token &opTok = advance();
-        const UnaryOp op = opTok.type == TokenType::Not ? UnaryOp::Not : UnaryOp::Negate;
+        UnaryOp op = UnaryOp::Not;
+        if (opTok.type == TokenType::Minus) {
+            op = UnaryOp::Negate;
+        } else if (opTok.type == TokenType::Tilde) {
+            op = UnaryOp::BitNot;
+        }
         ExprPtr operand = parseUnary();
         return std::make_unique<UnaryOpExprNode>(opTok.location, op, std::move(operand));
     }
@@ -557,6 +659,13 @@ ExprPtr Parser::parseUnary() {
         const UnaryOp op = opTok.type == TokenType::Ampersand ? UnaryOp::AddressOf : UnaryOp::Deref;
         ExprPtr operand = parseUnary();
         return std::make_unique<UnaryOpExprNode>(opTok.location, op, std::move(operand));
+    }
+    if (check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) {
+        const Token &opTok = advance();
+        ExprPtr target = parseUnary();
+        return std::make_unique<IncDecExprNode>(opTok.location, std::move(target),
+                                                /*isIncrement=*/opTok.type == TokenType::PlusPlus,
+                                                /*isPrefix=*/true);
     }
     return parsePostfix();
 }
@@ -580,6 +689,11 @@ ExprPtr Parser::parsePostfix() {
             // doc comment in ast.h.
             auto deref = std::make_unique<UnaryOpExprNode>(arrowTok.location, UnaryOp::Deref, std::move(expr));
             expr = std::make_unique<MemberExprNode>(arrowTok.location, std::move(deref), fieldTok.lexeme);
+        } else if (check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) {
+            const Token &opTok = advance();
+            expr = std::make_unique<IncDecExprNode>(opTok.location, std::move(expr),
+                                                    /*isIncrement=*/opTok.type == TokenType::PlusPlus,
+                                                    /*isPrefix=*/false);
         } else {
             break;
         }
@@ -612,6 +726,15 @@ ExprPtr Parser::parsePrimary() {
     case TokenType::LeftParen: {
         advance();
         ExprPtr expr = parseExpression();
+        // The comma operator is only reachable inside explicit parens, so
+        // it can never be confused with a comma-separated argument or
+        // parameter list.
+        while (check(TokenType::Comma)) {
+            const Token &commaTok = advance();
+            ExprPtr rhs = parseExpression();
+            expr = std::make_unique<BinOpExprNode>(commaTok.location, BinaryOp::Comma, std::move(expr),
+                                                   std::move(rhs));
+        }
         expect(TokenType::RightParen, "expected ')' after expression");
         return expr;
     }

@@ -22,7 +22,7 @@ block        ::= "{" statement* "}"
 
 statement    ::= var_decl
                | assign_stmt
-               | call_stmt
+               | expr_stmt
                | if_stmt
                | while_stmt
                | for_stmt
@@ -31,14 +31,22 @@ statement    ::= var_decl
                | continue_stmt
 
 var_decl     ::= type identifier ("[" int_lit "]")? ("=" expression)? ";"
-assign_stmt  ::= lvalue "=" expression ";"
-call_stmt    ::= identifier "(" args? ")" ";"
+assign_stmt  ::= lvalue assign_op expression ";"
+assign_op    ::= "=" | "+=" | "-=" | "*=" | "/=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+// A call or ++/-- used for its side effect; any other bare expression
+// statement (e.g. a stray `1 + 2;`) is a parse error, not silently a no-op.
+expr_stmt    ::= (identifier "(" args? ")" | unary) ";"
 lvalue       ::= identifier | "*" unary | postfix "[" expression "]" | postfix "." identifier
 
 if_stmt      ::= "if" "(" expression ")" block ("else" (if_stmt | block))?
 while_stmt   ::= "while" "(" expression ")" block
-for_stmt     ::= "for" "(" for_init? ";" expression? ";" assign_stmt_no_semi? ")" block
-for_init     ::= var_decl_no_semi | assign_stmt_no_semi
+for_stmt     ::= "for" "(" for_init? ";" expression? ";" simple_stmt_no_semi? ")" block
+for_init     ::= var_decl_no_semi | simple_stmt_no_semi
+// Used by for_init/the for-loop update clause: an assignment (any
+// assign_op) or a bare expression — unlike a top-level expr_stmt, any
+// expression is allowed here (e.g. `for (...; ...; i)` is legal, if
+// pointless), matching C.
+simple_stmt_no_semi ::= lvalue assign_op expression | expression
 
 return_stmt  ::= "return" expression? ";"
 break_stmt   ::= "break" ";"
@@ -168,11 +176,26 @@ struct or union variable, in contrast, **is** assignable as a whole
 (`p2 = p1;` copies every field) — see
 [Structs, Unions, and Enums](#structs-unions-and-enums).
 
-**call_stmt** — a function call used as a statement; its return value is
-discarded. Used primarily for `printf` and other void-returning functions.
+`assign_op` also includes the compound forms `+= -= *= /= &= |= ^= <<= >>=`.
+`target op= value` means `target = target op value`, except `target`'s
+*address* is only computed once — this matters when it has a side effect,
+e.g. `arr[f()] += 1` calls `f` exactly once, not twice.
+
+```c
+total += fi * fi;
+x &= mask;
+arr[i] <<= 1;
+```
+
+**expr_stmt** — a function call or `++`/`--` used as a statement; a call's
+return value is discarded. Any *other* bare expression statement (e.g. a
+stray `1 + 2;`) is a parse error rather than a silent no-op — MiniC assumes
+you meant an assignment.
 
 ```c
 printf("%d\n", fibonacci(i));
+i++;
+--count;
 ```
 
 **if_stmt** — the condition is parenthesised; each branch is a block. The
@@ -242,19 +265,27 @@ while (1) {
 Operator precedence, lowest to highest:
 
 ```bnf
-expression   ::= logical_or
+expression   ::= ternary
+ternary      ::= logical_or ("?" expression ":" ternary)?
 logical_or   ::= logical_and ("||" logical_and)*
-logical_and  ::= equality ("&&" equality)*
+logical_and  ::= bitwise_or ("&&" bitwise_or)*
+bitwise_or   ::= bitwise_xor ("|" bitwise_xor)*
+bitwise_xor  ::= bitwise_and ("^" bitwise_and)*
+bitwise_and  ::= equality ("&" equality)*
 equality     ::= comparison (("==" | "!=") comparison)*
-comparison   ::= additive (("<" | ">" | "<=" | ">=") additive)*
+comparison   ::= shift (("<" | ">" | "<=" | ">=") shift)*
+shift        ::= additive (("<<" | ">>") additive)*
 additive     ::= multiplicative (("+" | "-") multiplicative)*
 multiplicative ::= unary (("*" | "/") unary)*
-unary        ::= ("!" | "-" | "&" | "*") unary | postfix
-postfix      ::= primary ( "[" expression "]" | "." identifier | "->" identifier )*
+unary        ::= ("!" | "-" | "&" | "*" | "~") unary
+               | ("++" | "--") unary
+               | postfix
+postfix      ::= primary ( "[" expression "]" | "." identifier | "->" identifier
+                          | "++" | "--" )*
 primary      ::= int_lit | float_lit | char_lit | string_lit
                | identifier
                | identifier "(" args? ")"
-               | "(" expression ")"
+               | "(" expression ("," expression)* ")"
 args         ::= expression ("," expression)*
 ```
 
@@ -274,7 +305,21 @@ disambiguates by position, not by lookahead, exactly as in real C grammars.
 only ever need to handle the dot form. Indexing is its own grammar
 production rather than sugar for pointer arithmetic — there is no general
 `p + 1` pointer arithmetic via `+`/`-` (those operators still require
-numeric, non-pointer operands).
+numeric, non-pointer operands; this also means `++`/`--` reject pointer
+operands).
+
+The **comma operator** (`a, b`: evaluate `a` for its side effects, discard
+the result, then evaluate and yield `b`) is only reachable inside explicit
+parentheses — `primary`'s `"(" expression ("," expression)* ")"` production
+— never as a bare top-level production. This is deliberate: it means the
+comma operator can never be confused with the unrelated comma that
+separates call arguments or parameters, which are still plain
+comma-separated lists, not applications of the comma operator.
+
+`++`/`--` have a prefix form (parsed in `unary`, producing the
+already-updated value) and a postfix form (parsed in `postfix`, producing
+the value *before* the update); both require an lvalue operand and mutate
+it as a side effect, same as in C.
 
 ---
 
@@ -451,9 +496,80 @@ comparisons are composable with arithmetic.
 
 ### Logical Operators (&&, ||, !)
 
-Operands must be numeric; any non-zero value is treated as true. The result
-is `int` (1 or 0). Short-circuit evaluation is **not** guaranteed in the
-current implementation — both operands are evaluated.
+Each operand may be numeric *or* a pointer (matching `if`/`while`'s
+condition rule); any non-zero/non-null value is true. The result is `int`
+(1 or 0). `&&`/`||` **do** short-circuit: the right operand's code isn't
+even reached unless the left operand's value makes it necessary, so it's
+safe to write `p != 0 && p->field == 1` without `p` being dereferenced when
+null.
+
+### Bitwise Operators (&, |, ^, ~, <<, >>)
+
+Operands must be **integral** (`int` or `char` — not `float`, unlike the
+arithmetic operators). The result is always `int`. `<<`/`>>` shift the
+left operand by the right operand's value; `>>` is an arithmetic
+(sign-extending) shift, matching signed `int` on essentially all real
+platforms. `~` is the unary one's-complement operator.
+
+```c
+int flags = a & b | c ^ d;
+int shifted = (x << 2) >> 1;
+int inverted = ~mask;
+```
+
+Note that `&` here is the same token as address-of and `&&` — like
+`*`/dereference, the parser distinguishes the binary bitwise-AND form from
+the unary address-of form by position, not by a different token.
+
+### Ternary Conditional (?:)
+
+`condition ? thenExpr : elseExpr`. The condition follows the same
+numeric-or-pointer rule as `if`. The two branches must be the same type,
+or both numeric (in which case the usual `int`/`float` widening applies),
+or one a pointer and the other the null-pointer-constant `0` (matching
+`==`'s pointer rules). `?:` is right-associative and binds looser than
+every binary operator but tighter than nothing — it's the entry point of
+`expression` itself, so `a = b ? c : d` would need parentheses around the
+assignment if MiniC had assignment-as-an-expression (it doesn't; see
+[Variable Declaration and Assignment](#variable-declaration-and-assignment)).
+
+```c
+int max = a > b ? a : b;
+float f = cond ? someInt : someFloat;  // widens to float
+int *p = cond ? &x : 0;
+```
+
+### Increment/Decrement (++, --)
+
+`++x`/`--x` (prefix) update `x` and the expression's value *is* the new
+value; `x++`/`x--` (postfix) update `x` but the expression's value is the
+value *before* the update. The operand must be an lvalue and numeric (not
+a pointer — pointer `++` would be pointer arithmetic, which isn't
+supported). Both forms work as statements (`i++;`) or nested in a larger
+expression (`arr[i++]`, though MiniC has no array-literal/pointer
+arithmetic context where that idiom is as central as in real C).
+
+```c
+int i = 0;
+printf("%d\n", i++);  // prints 0, i is now 1
+printf("%d\n", ++i);  // prints 2, i is now 2
+```
+
+### Compound Assignment (+=, -=, *=, /=, &=, |=, ^=, <<=, >>=)
+
+`target op= value` means `target = target op value`, except `target`'s
+address is computed only once — relevant when it has a side effect (e.g.
+`arr[f()] += 1` calls `f` exactly once). The combined type must convert
+back to `target`'s type under the same rules as plain assignment
+(including the narrowing-conversion warning). There's no `%=` since MiniC
+has no `%` (modulo) operator.
+
+### Comma Operator (,)
+
+`(a, b)`: evaluate `a` for its side effects, discard the result, evaluate
+`b`, and yield it. Only reachable inside explicit parentheses, so it can
+never be confused with the argument-list/parameter-list comma. Most useful
+in a `for` loop's update clause: `for (...; ...; i++, j--)`.
 
 ### Implicit Conversions
 
@@ -517,19 +633,29 @@ while (n) { ... }   // ok: exits when n == 0
   `IfStmtNode`, `WhileStmtNode`, `ForStmtNode`, `ReturnStmtNode`,
   `BreakStmtNode`, `ContinueStmtNode` — statements
 - `BinOpExprNode`, `UnaryOpExprNode`, `CallExprNode`, `IdentExprNode`,
-  `IndexExprNode`, `MemberExprNode`, `IntLitExprNode`, `FloatLitExprNode`,
-  `CharLitExprNode`, `StringLitExprNode` — expressions. `UnaryOpExprNode`
-  covers `&`/`*` (`UnaryOp::AddressOf`/`Deref`) as well as `-`/`!`.
-  `IndexExprNode` holds `base`/`index` sub-expressions for `arr[i]`.
-  `MemberExprNode` holds a `base` expression and a `field` name for
-  `base.field` — `base->field` is desugared at parse time into
-  `MemberExprNode{UnaryOpExprNode{Deref, base}, field}`, so this node only
-  ever represents the dot form.
+  `IndexExprNode`, `MemberExprNode`, `TernaryExprNode`, `IncDecExprNode`,
+  `IntLitExprNode`, `FloatLitExprNode`, `CharLitExprNode`,
+  `StringLitExprNode` — expressions.
+  - `UnaryOpExprNode` covers `&`/`*`/`~` (`UnaryOp::AddressOf`/`Deref`/`BitNot`)
+    as well as `-`/`!`.
+  - `BinOpExprNode` covers `&`/`|`/`^`/`<<`/`>>` (`BinaryOp::BitAnd`/`BitOr`/
+    `BitXor`/`Shl`/`Shr`) and the comma operator (`BinaryOp::Comma`)
+    alongside the arithmetic/comparison/logical operators.
+  - `IndexExprNode` holds `base`/`index` sub-expressions for `arr[i]`.
+  - `MemberExprNode` holds a `base` expression and a `field` name for
+    `base.field` — `base->field` is desugared at parse time into
+    `MemberExprNode{UnaryOpExprNode{Deref, base}, field}`, so this node
+    only ever represents the dot form.
+  - `TernaryExprNode` holds `condition`/`thenExpr`/`elseExpr`.
+  - `IncDecExprNode` holds a `target` lvalue plus `isIncrement`/`isPrefix`
+    flags, covering all four of `++x`, `--x`, `x++`, `x--` with one node.
 
 `AssignStmtNode::target` is a general lvalue expression (an `IdentExprNode`,
 a `UnaryOpExprNode{Deref, ...}`, an `IndexExprNode`, or a `MemberExprNode`),
 not just a variable name, so that `*p = 5;`, `arr[i] = 5;`, `s.field = 5;`,
-and `x = 5;` all share the same AST shape.
+and `x = 5;` all share the same AST shape. `AssignStmtNode::compoundOp` is
+an `std::optional<BinaryOp>`: empty for a plain `=`, or set to e.g.
+`BinaryOp::Add` for `+=` — there's no separate "compound assignment" node.
 
 Every node implements `print(std::ostream&, int indent)`, used by the
 `--emit-ast` CLI flag to dump an indented tree, e.g.:

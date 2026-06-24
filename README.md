@@ -51,8 +51,8 @@ scope is fully supported; anything outside scope is a clear compile error.
 any of those (`int *`, `float **`, ...), fixed-size single-dimension arrays
 (`int arr[10]`), and named structs/unions/enums (`struct Point`, `union
 Number`, `enum Color`). See [docs/ROADMAP.md](docs/ROADMAP.md) for what's
-still missing (bitwise operators, `switch`, casts, `sizeof`, storage
-classes, function prototypes).
+still missing (`switch`, casts, `sizeof`, storage classes, function
+prototypes).
 
 **Variables and pointers**
 Local variable declarations with initializers (`int x = 5;`),
@@ -91,7 +91,18 @@ Integer division truncates toward zero, matching C semantics.
 
 **Comparison and logical operators**
 `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`.
-All comparisons produce an `int` result (0 or 1), matching C.
+All comparisons produce an `int` result (0 or 1), matching C. `&&`/`||`
+short-circuit (the right operand's code only runs when needed), and either
+operand may be a pointer (`p && p->x`) — not just numeric.
+
+**Bitwise, ternary, increment/decrement, compound assignment, comma**
+`&`, `|`, `^`, `~`, `<<`, `>>` (integral operands only, not `float`);
+`cond ? a : b`; prefix/postfix `++`/`--`; compound assignment (`+=`, `-=`,
+`*=`, `/=`, `&=`, `|=`, `^=`, `<<=`, `>>=` — the target's address is
+computed only once, so `arr[f()] += 1` calls `f` exactly once); and the
+comma operator, reachable only inside explicit parentheses (`(a, b)`) so it
+can never collide with the unrelated comma in call-argument or parameter
+lists. No `%`/`%=` (no modulo operator).
 
 **Control flow**
 `if`/`else`, `while`, and `for` loops. Nested control flow is fully
@@ -290,7 +301,7 @@ Total Test time (real) =   1.5 sec
 | `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
 | `parser_test` | AST shape for every grammar construct, plus parse-error messages |
 | `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `codegen_test` | Compiles and **runs** all seven example programs through the full pipeline, asserting on exact stdout |
+| `codegen_test` | Compiles and **runs** all eight example programs through the full pipeline, asserting on exact stdout |
 | `smoke_test` | End-to-end CLI sanity check |
 
 **Output correctness is cross-validated against clang.** Every example
@@ -305,6 +316,7 @@ sum_of_squares: IDENTICAL
 pointer_swap: IDENTICAL
 array_sum: IDENTICAL
 struct_point: IDENTICAL
+bit_ops: IDENTICAL
 ```
 
 ### Bug hunt and hardening
@@ -383,7 +395,8 @@ minic-compiler/
 │   ├── gcd.mc
 │   ├── pointer_swap.mc
 │   ├── array_sum.mc
-│   └── struct_point.mc
+│   ├── struct_point.mc
+│   └── bit_ops.mc
 └── docs/
     ├── ROADMAP.md           ← build plan + language-coverage roadmap
     ├── language_spec.md     ← BNF grammar + type rules

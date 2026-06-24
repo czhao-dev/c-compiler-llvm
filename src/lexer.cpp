@@ -71,6 +71,24 @@ std::string tokenTypeName(TokenType type) {
     case TokenType::Or: return "TOK_OR";
     case TokenType::Not: return "TOK_NOT";
     case TokenType::Ampersand: return "TOK_AMP";
+    case TokenType::Pipe: return "TOK_PIPE";
+    case TokenType::Caret: return "TOK_CARET";
+    case TokenType::Tilde: return "TOK_TILDE";
+    case TokenType::LeftShift: return "TOK_SHL";
+    case TokenType::RightShift: return "TOK_SHR";
+    case TokenType::Question: return "TOK_QUESTION";
+    case TokenType::Colon: return "TOK_COLON";
+    case TokenType::PlusPlus: return "TOK_PLUSPLUS";
+    case TokenType::MinusMinus: return "TOK_MINUSMINUS";
+    case TokenType::PlusAssign: return "TOK_PLUS_ASSIGN";
+    case TokenType::MinusAssign: return "TOK_MINUS_ASSIGN";
+    case TokenType::StarAssign: return "TOK_STAR_ASSIGN";
+    case TokenType::SlashAssign: return "TOK_SLASH_ASSIGN";
+    case TokenType::AmpAssign: return "TOK_AMP_ASSIGN";
+    case TokenType::PipeAssign: return "TOK_PIPE_ASSIGN";
+    case TokenType::CaretAssign: return "TOK_CARET_ASSIGN";
+    case TokenType::ShlAssign: return "TOK_SHL_ASSIGN";
+    case TokenType::ShrAssign: return "TOK_SHR_ASSIGN";
     case TokenType::Assign: return "TOK_ASSIGN";
     case TokenType::LeftParen: return "TOK_LPAREN";
     case TokenType::RightParen: return "TOK_RPAREN";
@@ -130,14 +148,35 @@ Token Lexer::nextToken() {
     }
 
     switch (ch) {
-    case '+': return makeToken(TokenType::Plus, "+", startLine, startColumn);
+    case '+':
+        if (match('+')) {
+            return makeToken(TokenType::PlusPlus, "++", startLine, startColumn);
+        }
+        if (match('=')) {
+            return makeToken(TokenType::PlusAssign, "+=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Plus, "+", startLine, startColumn);
     case '-':
         if (match('>')) {
             return makeToken(TokenType::Arrow, "->", startLine, startColumn);
         }
+        if (match('-')) {
+            return makeToken(TokenType::MinusMinus, "--", startLine, startColumn);
+        }
+        if (match('=')) {
+            return makeToken(TokenType::MinusAssign, "-=", startLine, startColumn);
+        }
         return makeToken(TokenType::Minus, "-", startLine, startColumn);
-    case '*': return makeToken(TokenType::Star, "*", startLine, startColumn);
-    case '/': return makeToken(TokenType::Slash, "/", startLine, startColumn);
+    case '*':
+        if (match('=')) {
+            return makeToken(TokenType::StarAssign, "*=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Star, "*", startLine, startColumn);
+    case '/':
+        if (match('=')) {
+            return makeToken(TokenType::SlashAssign, "/=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Slash, "/", startLine, startColumn);
     case '=': {
         const bool isEqual = match('=');
         return makeToken(isEqual ? TokenType::Equal : TokenType::Assign,
@@ -150,28 +189,52 @@ Token Lexer::nextToken() {
                          hasEqual ? "!=" : "!",
                          startLine, startColumn);
     }
-    case '<': {
-        const bool hasEqual = match('=');
-        return makeToken(hasEqual ? TokenType::LessEqual : TokenType::Less,
-                         hasEqual ? "<=" : "<",
-                         startLine, startColumn);
-    }
-    case '>': {
-        const bool hasEqual = match('=');
-        return makeToken(hasEqual ? TokenType::GreaterEqual : TokenType::Greater,
-                         hasEqual ? ">=" : ">",
-                         startLine, startColumn);
-    }
+    case '<':
+        if (match('<')) {
+            const bool hasEqual = match('=');
+            return makeToken(hasEqual ? TokenType::ShlAssign : TokenType::LeftShift,
+                             hasEqual ? "<<=" : "<<",
+                             startLine, startColumn);
+        }
+        if (match('=')) {
+            return makeToken(TokenType::LessEqual, "<=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Less, "<", startLine, startColumn);
+    case '>':
+        if (match('>')) {
+            const bool hasEqual = match('=');
+            return makeToken(hasEqual ? TokenType::ShrAssign : TokenType::RightShift,
+                             hasEqual ? ">>=" : ">>",
+                             startLine, startColumn);
+        }
+        if (match('=')) {
+            return makeToken(TokenType::GreaterEqual, ">=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Greater, ">", startLine, startColumn);
     case '&':
         if (match('&')) {
             return makeToken(TokenType::And, "&&", startLine, startColumn);
+        }
+        if (match('=')) {
+            return makeToken(TokenType::AmpAssign, "&=", startLine, startColumn);
         }
         return makeToken(TokenType::Ampersand, "&", startLine, startColumn);
     case '|':
         if (match('|')) {
             return makeToken(TokenType::Or, "||", startLine, startColumn);
         }
-        error(startLine, startColumn, "expected '|' after '|'");
+        if (match('=')) {
+            return makeToken(TokenType::PipeAssign, "|=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Pipe, "|", startLine, startColumn);
+    case '^':
+        if (match('=')) {
+            return makeToken(TokenType::CaretAssign, "^=", startLine, startColumn);
+        }
+        return makeToken(TokenType::Caret, "^", startLine, startColumn);
+    case '~': return makeToken(TokenType::Tilde, "~", startLine, startColumn);
+    case '?': return makeToken(TokenType::Question, "?", startLine, startColumn);
+    case ':': return makeToken(TokenType::Colon, ":", startLine, startColumn);
     case '(': return makeToken(TokenType::LeftParen, "(", startLine, startColumn);
     case ')': return makeToken(TokenType::RightParen, ")", startLine, startColumn);
     case '{': return makeToken(TokenType::LeftBrace, "{", startLine, startColumn);

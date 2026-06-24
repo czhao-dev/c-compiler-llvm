@@ -89,9 +89,15 @@ private:
     Type checkIdent(const IdentExprNode &expr);
     Type checkUnaryOp(const UnaryOpExprNode &expr);
     Type checkBinOp(const BinOpExprNode &expr);
+    // The type-combining half of checkBinOp; see its definition for why
+    // it's factored out (compound assignment reuses it).
+    Type checkBinOpTypes(const SourceLocation &location, BinaryOp op, Type lhsType, Type rhsType,
+                          const ExprNode *lhsExpr, const ExprNode *rhsExpr);
     Type checkCall(const CallExprNode &expr);
     Type checkIndex(const IndexExprNode &expr);
     Type checkMember(const MemberExprNode &expr);
+    Type checkTernary(const TernaryExprNode &expr);
+    Type checkIncDec(const IncDecExprNode &expr);
 
     // Checks that a value of type `value` may be stored into (or returned
     // as, or passed as an argument of) type `target`. Reports an error for

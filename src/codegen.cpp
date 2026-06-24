@@ -66,6 +66,11 @@ bool isLogical(BinaryOp op) {
     return op == BinaryOp::And || op == BinaryOp::Or;
 }
 
+bool isBitwiseOp(BinaryOp op) {
+    return op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor || op == BinaryOp::Shl ||
+           op == BinaryOp::Shr;
+}
+
 std::string locationString(const SourceLocation &location) {
     std::ostringstream out;
     out << location.filename << ':' << location.line << ':' << location.column;
@@ -424,6 +429,18 @@ private:
     void emitAssign(const AssignStmtNode &assign) {
         LValue target = emitLValue(*assign.target);
         TypedValue value = emitExpr(*assign.value);
+
+        if (assign.compoundOp) {
+            // `target op= value` reads target's *current* value here rather
+            // than re-evaluating assign.target (target's address was only
+            // computed once, above, so any side effects in e.g.
+            // `arr[f()] += 1` happen exactly once).
+            llvm::Value *current = builder_.CreateLoad(toLLVMType(target.type), target.address, "compoundload");
+            TypedValue result = combineBinary(*assign.compoundOp, {current, target.type}, value, assign.location);
+            builder_.CreateStore(castForStore(result.value, result.type, target.type), target.address);
+            return;
+        }
+
         builder_.CreateStore(castForStore(value.value, value.type, target.type), target.address);
     }
 
@@ -584,8 +601,76 @@ private:
             LValue lv = emitLValue(expr);
             return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "memberload"), lv.type};
         }
+        if (const auto *ternary = dynamic_cast<const TernaryExprNode *>(&expr)) {
+            return emitTernary(*ternary);
+        }
+        if (const auto *incDec = dynamic_cast<const IncDecExprNode *>(&expr)) {
+            return emitIncDec(*incDec);
+        }
 
         throw std::runtime_error(locationString(expr.location) + ": unsupported expression in codegen");
+    }
+
+    TypedValue emitTernary(const TernaryExprNode &expr) {
+        llvm::Function *func = builder_.GetInsertBlock()->getParent();
+        auto *thenBlock = llvm::BasicBlock::Create(context_, "ternary.then", func);
+        auto *elseBlock = llvm::BasicBlock::Create(context_, "ternary.else", func);
+        auto *mergeBlock = llvm::BasicBlock::Create(context_, "ternary.end", func);
+
+        TypedValue condition = emitExpr(*expr.condition);
+        builder_.CreateCondBr(toBool(condition), thenBlock, elseBlock);
+
+        builder_.SetInsertPoint(thenBlock);
+        TypedValue thenValue = emitExpr(*expr.thenExpr);
+        llvm::BasicBlock *thenExit = builder_.GetInsertBlock();
+
+        builder_.SetInsertPoint(elseBlock);
+        TypedValue elseValue = emitExpr(*expr.elseExpr);
+        llvm::BasicBlock *elseExit = builder_.GetInsertBlock();
+
+        // Sema (checkTernary) already validated the two branches are
+        // compatible; pick the same result type it would have, then cast
+        // each branch's value to it — a PHI's incoming values must all
+        // share one LLVM type.
+        Type resultType = thenValue.type;
+        if (thenValue.type != elseValue.type && isNumericType(thenValue.type) && isNumericType(elseValue.type)) {
+            resultType = commonNumericType(thenValue.type, elseValue.type);
+        } else if (thenValue.type != elseValue.type && elseValue.type.isPointer() && !thenValue.type.isPointer()) {
+            resultType = elseValue.type;
+        }
+
+        builder_.SetInsertPoint(thenExit);
+        llvm::Value *thenCast = castForStore(thenValue.value, thenValue.type, resultType);
+        builder_.CreateBr(mergeBlock);
+
+        builder_.SetInsertPoint(elseExit);
+        llvm::Value *elseCast = castForStore(elseValue.value, elseValue.type, resultType);
+        builder_.CreateBr(mergeBlock);
+
+        builder_.SetInsertPoint(mergeBlock);
+        llvm::PHINode *phi = builder_.CreatePHI(toLLVMType(resultType), 2, "ternarytmp");
+        phi->addIncoming(thenCast, thenExit);
+        phi->addIncoming(elseCast, elseExit);
+        return {phi, resultType};
+    }
+
+    TypedValue emitIncDec(const IncDecExprNode &expr) {
+        LValue target = emitLValue(*expr.target);
+        llvm::Value *oldValue = builder_.CreateLoad(toLLVMType(target.type), target.address, "incdecold");
+
+        llvm::Value *newValue;
+        if (target.type == Type::Float) {
+            llvm::Value *one = llvm::ConstantFP::get(llvm::Type::getFloatTy(context_), 1.0);
+            newValue = expr.isIncrement ? builder_.CreateFAdd(oldValue, one, "incdecnew")
+                                        : builder_.CreateFSub(oldValue, one, "incdecnew");
+        } else {
+            llvm::Value *one = llvm::ConstantInt::get(toLLVMType(target.type), 1, true);
+            newValue = expr.isIncrement ? builder_.CreateAdd(oldValue, one, "incdecnew")
+                                        : builder_.CreateSub(oldValue, one, "incdecnew");
+        }
+
+        builder_.CreateStore(newValue, target.address);
+        return {expr.isPrefix ? newValue : oldValue, target.type};
     }
 
     TypedValue emitIdent(const IdentExprNode &expr) {
@@ -668,6 +753,18 @@ private:
             LValue lv = emitLValue(expr);
             return {builder_.CreateLoad(toLLVMType(lv.type), lv.address, "derefload"), lv.type};
         }
+        if (expr.op == UnaryOp::BitNot) {
+            TypedValue operand = emitExpr(*expr.operand);
+            llvm::Value *intVal = castNumeric(operand.value, operand.type, Type::Int);
+            return {builder_.CreateNot(intVal, "bitnottmp"), Type::Int};
+        }
+        if (expr.op == UnaryOp::Not) {
+            // toBool already handles pointer operands (see sema's
+            // checkUnaryOp for why `!p` is allowed).
+            TypedValue operand = emitExpr(*expr.operand);
+            llvm::Value *notValue = builder_.CreateNot(toBool(operand), "nottmp");
+            return {builder_.CreateZExt(notValue, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
+        }
 
         TypedValue operand = emitExpr(*expr.operand);
         if (!isNumericType(operand.type)) {
@@ -680,10 +777,6 @@ private:
                 return {builder_.CreateFNeg(operand.value, "negtmp"), Type::Float};
             }
             return {builder_.CreateNeg(castNumeric(operand.value, operand.type, Type::Int), "negtmp"), Type::Int};
-        case UnaryOp::Not: {
-            llvm::Value *notValue = builder_.CreateNot(toBool(operand), "nottmp");
-            return {builder_.CreateZExt(notValue, llvm::Type::getInt32Ty(context_), "booltoint"), Type::Int};
-        }
         default: break;
         }
         throw std::runtime_error(locationString(expr.location) + ": unknown unary operator in codegen");
@@ -734,9 +827,20 @@ private:
             }
         }
 
+        if (expr.op == BinaryOp::Comma) {
+            emitExpr(*expr.lhs); // evaluated only for its side effects
+            return emitExpr(*expr.rhs);
+        }
+
         TypedValue lhs = emitExpr(*expr.lhs);
         TypedValue rhs = emitExpr(*expr.rhs);
+        return combineBinary(expr.op, lhs, rhs, expr.location);
+    }
 
+    // The "combine two already-evaluated operands" half of emitBinary,
+    // factored out so compound assignment (`target op= value`) can reuse it
+    // without re-evaluating target (see emitAssign).
+    TypedValue combineBinary(BinaryOp op, TypedValue lhs, TypedValue rhs, const SourceLocation &location) {
         // Sema only allows pointer operands for == and != (pointer-to-pointer
         // or pointer-vs-null-literal), so the only LLVM operand-type mismatch
         // possible here is "pointer vs. the i32 constant 0" — replace that
@@ -746,27 +850,42 @@ private:
                                                       : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
             llvm::Value *right = rhs.type.isPointer() ? rhs.value
                                                        : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
-            llvm::Value *cmp = expr.op == BinaryOp::Eq ? builder_.CreateICmpEQ(left, right, "eqtmp")
-                                                        : builder_.CreateICmpNE(left, right, "neqtmp");
+            llvm::Value *cmp = op == BinaryOp::Eq ? builder_.CreateICmpEQ(left, right, "eqtmp")
+                                                   : builder_.CreateICmpNE(left, right, "neqtmp");
             return {builder_.CreateZExt(cmp, llvm::Type::getInt32Ty(context_), "cmptoint"), Type::Int};
+        }
+
+        if (isBitwiseOp(op)) {
+            llvm::Value *left = castNumeric(lhs.value, lhs.type, Type::Int);
+            llvm::Value *right = castNumeric(rhs.value, rhs.type, Type::Int);
+            switch (op) {
+            case BinaryOp::BitAnd: return {builder_.CreateAnd(left, right, "andtmp"), Type::Int};
+            case BinaryOp::BitOr: return {builder_.CreateOr(left, right, "ortmp"), Type::Int};
+            case BinaryOp::BitXor: return {builder_.CreateXor(left, right, "xortmp"), Type::Int};
+            case BinaryOp::Shl: return {builder_.CreateShl(left, right, "shltmp"), Type::Int};
+            // Arithmetic (sign-extending) shift, matching signed `int`.
+            case BinaryOp::Shr: return {builder_.CreateAShr(left, right, "shrtmp"), Type::Int};
+            default: break;
+            }
+            throw std::runtime_error(locationString(location) + ": unknown bitwise operator in codegen");
         }
 
         const Type common = commonNumericType(lhs.type, rhs.type);
         llvm::Value *left = castNumeric(lhs.value, lhs.type, common);
         llvm::Value *right = castNumeric(rhs.value, rhs.type, common);
 
-        if (isComparison(expr.op)) {
+        if (isComparison(op)) {
             llvm::Value *cmp = nullptr;
             if (common == Type::Float) {
-                cmp = emitFloatCompare(expr.op, left, right);
+                cmp = emitFloatCompare(op, left, right);
             } else {
-                cmp = emitIntCompare(expr.op, left, right);
+                cmp = emitIntCompare(op, left, right);
             }
             return {builder_.CreateZExt(cmp, llvm::Type::getInt32Ty(context_), "cmptoint"), Type::Int};
         }
 
         if (common == Type::Float) {
-            switch (expr.op) {
+            switch (op) {
             case BinaryOp::Add: return {builder_.CreateFAdd(left, right, "addtmp"), Type::Float};
             case BinaryOp::Sub: return {builder_.CreateFSub(left, right, "subtmp"), Type::Float};
             case BinaryOp::Mul: return {builder_.CreateFMul(left, right, "multmp"), Type::Float};
@@ -774,7 +893,7 @@ private:
             default: break;
             }
         } else {
-            switch (expr.op) {
+            switch (op) {
             case BinaryOp::Add: return {builder_.CreateAdd(left, right, "addtmp"), Type::Int};
             case BinaryOp::Sub: return {builder_.CreateSub(left, right, "subtmp"), Type::Int};
             case BinaryOp::Mul: return {builder_.CreateMul(left, right, "multmp"), Type::Int};
@@ -783,7 +902,7 @@ private:
             }
         }
 
-        throw std::runtime_error(locationString(expr.location) + ": unknown binary operator in codegen");
+        throw std::runtime_error(locationString(location) + ": unknown binary operator in codegen");
     }
 
     TypedValue emitCall(const CallExprNode &expr) {

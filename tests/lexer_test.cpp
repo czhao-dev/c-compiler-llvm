@@ -165,6 +165,45 @@ int main() {
         });
 
     expectTypes(
+        "a & b | c ^ ~d << 1 >> 2; a ? b : c; i++; --i; a += 1; a <<= 1;",
+        {
+            TokenType::Identifier,
+            TokenType::Ampersand,
+            TokenType::Identifier,
+            TokenType::Pipe,
+            TokenType::Identifier,
+            TokenType::Caret,
+            TokenType::Tilde,
+            TokenType::Identifier,
+            TokenType::LeftShift,
+            TokenType::IntLiteral,
+            TokenType::RightShift,
+            TokenType::IntLiteral,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::Question,
+            TokenType::Identifier,
+            TokenType::Colon,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::PlusPlus,
+            TokenType::Semicolon,
+            TokenType::MinusMinus,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::PlusAssign,
+            TokenType::IntLiteral,
+            TokenType::Semicolon,
+            TokenType::Identifier,
+            TokenType::ShlAssign,
+            TokenType::IntLiteral,
+            TokenType::Semicolon,
+            TokenType::EndOfFile,
+        });
+
+    expectTypes(
         "int *p = &x; int y = *p;",
         {
             TokenType::Int,

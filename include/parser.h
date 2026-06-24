@@ -52,7 +52,11 @@ private:
     StmtPtr parseStatement();
     std::unique_ptr<VarDeclStmtNode> parseVarDeclNoSemi();
     StmtPtr parseVarDecl();
-    std::unique_ptr<AssignStmtNode> parseAssignNoSemi();
+    // Parses a single non-declaration "simple statement" without a trailing
+    // semicolon: an assignment (plain or compound), or a bare expression
+    // (e.g. `i++`) wrapped in ExprStmtNode. Shared by for-loop init/update
+    // and (with its own semicolon handling) top-level statement parsing.
+    StmtPtr parseSimpleStmtNoSemi();
     StmtPtr parseAssignOrExprStmt();
     StmtPtr parseIf();
     StmtPtr parseWhile();
@@ -63,12 +67,22 @@ private:
     StmtPtr parseBreak();
     StmtPtr parseContinue();
 
+    // True for a binary operator's assignment form (+=, &=, etc.); maps it
+    // to the BinaryOp it desugars through in a compound AssignStmtNode.
+    bool isCompoundAssignToken(TokenType type) const;
+    BinaryOp compoundAssignOp(TokenType type) const;
+
     // Expressions, ordered from lowest to highest precedence.
     ExprPtr parseExpression();
+    ExprPtr parseTernary();
     ExprPtr parseLogicalOr();
     ExprPtr parseLogicalAnd();
+    ExprPtr parseBitwiseOr();
+    ExprPtr parseBitwiseXor();
+    ExprPtr parseBitwiseAnd();
     ExprPtr parseEquality();
     ExprPtr parseComparison();
+    ExprPtr parseShift();
     ExprPtr parseAdditive();
     ExprPtr parseMultiplicative();
     ExprPtr parseUnary();
