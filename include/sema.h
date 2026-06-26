@@ -5,6 +5,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace minic {
@@ -82,6 +83,14 @@ private:
     void checkIf(const IfStmtNode &stmt);
     void checkWhile(const WhileStmtNode &stmt);
     void checkFor(const ForStmtNode &stmt);
+    void checkDoWhile(const DoWhileStmtNode &stmt);
+    void checkSwitch(const SwitchStmtNode &stmt);
+    // Recursively gathers every LabelStmtNode name in `stmt` (and its
+    // nested blocks/loops/switch) into `labels`, so a `goto` can jump
+    // forward to a label declared later in the same function; any name
+    // seen more than once is recorded in `duplicates`.
+    void collectLabels(const StmtNode &stmt, std::unordered_set<std::string> &labels,
+                        std::unordered_set<std::string> &duplicates);
     void checkReturn(const ReturnStmtNode &stmt);
     void checkCondition(const SourceLocation &location, Type type);
 
@@ -122,6 +131,8 @@ private:
     SymbolTable symbols_;
     const FuncDefNode *currentFunction_ = nullptr;
     int loopDepth_ = 0;
+    int switchDepth_ = 0;
+    std::unordered_set<std::string> declaredLabels_;
 };
 
 std::string semanticAnalyzerStatus();

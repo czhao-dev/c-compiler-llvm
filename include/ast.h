@@ -375,6 +375,72 @@ public:
     void print(std::ostream &out, int indent) const override;
 };
 
+// `do { body } while (condition);` — condition is checked after the body,
+// so the body always runs at least once.
+class DoWhileStmtNode : public StmtNode {
+public:
+    DoWhileStmtNode(SourceLocation location, std::unique_ptr<BlockStmtNode> body, ExprPtr condition);
+    void print(std::ostream &out, int indent) const override;
+
+    std::unique_ptr<BlockStmtNode> body;
+    ExprPtr condition;
+};
+
+// `case value:` inside a switch body. Only recognized at the top level of
+// a SwitchStmtNode's body (not nested inside an if/while within the
+// switch) — see SwitchStmtNode's doc comment.
+class CaseLabelStmtNode : public StmtNode {
+public:
+    CaseLabelStmtNode(SourceLocation location, long long value);
+    void print(std::ostream &out, int indent) const override;
+
+    long long value;
+};
+
+// `default:` inside a switch body. Same top-level-only restriction as
+// CaseLabelStmtNode.
+class DefaultLabelStmtNode : public StmtNode {
+public:
+    explicit DefaultLabelStmtNode(SourceLocation location);
+    void print(std::ostream &out, int indent) const override;
+};
+
+// `switch (value) { ... }`. `body`'s direct statements are a flat,
+// fallthrough sequence exactly like C: CaseLabelStmtNode/DefaultLabelStmtNode
+// markers split it into segments, but control flows from one segment into
+// the next unless a `break` (or `return`) ends it. Case labels nested
+// inside an if/while/etc. within the switch (the rare "Duff's device"
+// idiom) are not recognized — only the ones directly in `body`.
+class SwitchStmtNode : public StmtNode {
+public:
+    SwitchStmtNode(SourceLocation location, ExprPtr value, std::unique_ptr<BlockStmtNode> body);
+    void print(std::ostream &out, int indent) const override;
+
+    ExprPtr value;
+    std::unique_ptr<BlockStmtNode> body;
+};
+
+// `name:` — a goto target. Like case/default labels, recognized as a
+// statement so it can appear anywhere a statement can.
+class LabelStmtNode : public StmtNode {
+public:
+    LabelStmtNode(SourceLocation location, std::string name);
+    void print(std::ostream &out, int indent) const override;
+
+    std::string name;
+};
+
+// `goto name;`. Forward jumps work because codegen pre-scans a function
+// body for every label before emitting any code — see
+// CodeGenerator::collectLabels.
+class GotoStmtNode : public StmtNode {
+public:
+    GotoStmtNode(SourceLocation location, std::string name);
+    void print(std::ostream &out, int indent) const override;
+
+    std::string name;
+};
+
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------

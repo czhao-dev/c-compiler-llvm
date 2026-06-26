@@ -84,6 +84,8 @@ int main() {
     assert(compileAndRun(dir + "/bit_ops.mc") ==
            "0 has 0 bits set\n7 has 3 bits set\n14 has 3 bits set\n21 has 3 bits set\n28 has 3 bits set\n"
            "total=12\nclamped=12\n");
+    assert(compileAndRun(dir + "/control_flow.mc") ==
+           "classify(0)=0\nclassify(1)=1\nclassify(2)=1\nclassify(3)=-1\nn=3\ncount=9\n");
 
     const std::string fizz = compileAndRun(dir + "/fizzbuzz.mc");
     assert(fizz.substr(0, 2) == "1\n");

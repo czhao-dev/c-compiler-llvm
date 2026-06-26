@@ -229,8 +229,19 @@ void SemanticAnalyzer::collectSignatures(const ProgramNode &program) {
 void SemanticAnalyzer::checkFunction(const FuncDefNode &func) {
     currentFunction_ = &func;
     loopDepth_ = 0;
+    switchDepth_ = 0;
 
     checkTypeIsValid(func.location, func.returnType);
+
+    // Pre-pass so a `goto` can jump forward to a label declared later in
+    // the function (mirrors collectSignatures letting functions call each
+    // other regardless of order).
+    declaredLabels_.clear();
+    std::unordered_set<std::string> duplicateLabels;
+    collectLabels(*func.body, declaredLabels_, duplicateLabels);
+    for (const auto &name : duplicateLabels) {
+        error(func.location, "duplicate label '" + name + "' in function '" + func.name + "'");
+    }
 
     symbols_.enterScope();
 
@@ -273,12 +284,26 @@ void SemanticAnalyzer::checkStmt(const StmtNode &stmt) {
     } else if (const auto *ret = dynamic_cast<const ReturnStmtNode *>(&stmt)) {
         checkReturn(*ret);
     } else if (dynamic_cast<const BreakStmtNode *>(&stmt)) {
-        if (loopDepth_ == 0) {
-            error(stmt.location, "'break' statement not within a loop");
+        if (loopDepth_ == 0 && switchDepth_ == 0) {
+            error(stmt.location, "'break' statement not within a loop or switch");
         }
     } else if (dynamic_cast<const ContinueStmtNode *>(&stmt)) {
         if (loopDepth_ == 0) {
             error(stmt.location, "'continue' statement not within a loop");
+        }
+    } else if (const auto *doWhile = dynamic_cast<const DoWhileStmtNode *>(&stmt)) {
+        checkDoWhile(*doWhile);
+    } else if (const auto *switchStmt = dynamic_cast<const SwitchStmtNode *>(&stmt)) {
+        checkSwitch(*switchStmt);
+    } else if (dynamic_cast<const CaseLabelStmtNode *>(&stmt)) {
+        error(stmt.location, "'case' label not within (or not directly inside) a switch statement");
+    } else if (dynamic_cast<const DefaultLabelStmtNode *>(&stmt)) {
+        error(stmt.location, "'default' label not within (or not directly inside) a switch statement");
+    } else if (dynamic_cast<const LabelStmtNode *>(&stmt)) {
+        // Validity (no duplicates) is checked once up front, in checkFunction.
+    } else if (const auto *gotoStmt = dynamic_cast<const GotoStmtNode *>(&stmt)) {
+        if (declaredLabels_.count(gotoStmt->name) == 0) {
+            error(stmt.location, "use of undeclared label '" + gotoStmt->name + "'");
         }
     } else if (const auto *block = dynamic_cast<const BlockStmtNode *>(&stmt)) {
         symbols_.enterScope();
@@ -383,6 +408,75 @@ void SemanticAnalyzer::checkFor(const ForStmtNode &stmt) {
     --loopDepth_;
 
     symbols_.exitScope();
+}
+
+void SemanticAnalyzer::checkDoWhile(const DoWhileStmtNode &stmt) {
+    ++loopDepth_;
+    symbols_.enterScope();
+    checkBlock(*stmt.body);
+    symbols_.exitScope();
+    --loopDepth_;
+
+    // Checked in the outer scope, not the body's — a variable declared in
+    // the do-block is out of scope by the time `while (...)` is reached,
+    // matching C (the body's closing brace ends its scope before `while`).
+    checkCondition(stmt.condition->location, checkExpr(*stmt.condition));
+}
+
+void SemanticAnalyzer::checkSwitch(const SwitchStmtNode &stmt) {
+    const Type valueType = checkExpr(*stmt.value);
+    if (!isIntegralType(valueType)) {
+        error(stmt.value->location, "switch value must have an integer type, got '" + typeName(valueType) + "'");
+    }
+
+    ++switchDepth_;
+    symbols_.enterScope();
+
+    bool hasDefault = false;
+    std::unordered_set<long long> seenValues;
+    for (const auto &s : stmt.body->statements) {
+        if (const auto *caseLabel = dynamic_cast<const CaseLabelStmtNode *>(s.get())) {
+            if (!seenValues.insert(caseLabel->value).second) {
+                error(caseLabel->location, "duplicate case value '" + std::to_string(caseLabel->value) + "'");
+            }
+        } else if (dynamic_cast<const DefaultLabelStmtNode *>(s.get())) {
+            if (hasDefault) {
+                error(s->location, "multiple 'default' labels in one switch statement");
+            }
+            hasDefault = true;
+        } else {
+            checkStmt(*s);
+        }
+    }
+
+    symbols_.exitScope();
+    --switchDepth_;
+}
+
+void SemanticAnalyzer::collectLabels(const StmtNode &stmt, std::unordered_set<std::string> &labels,
+                                      std::unordered_set<std::string> &duplicates) {
+    if (const auto *label = dynamic_cast<const LabelStmtNode *>(&stmt)) {
+        if (!labels.insert(label->name).second) {
+            duplicates.insert(label->name);
+        }
+    } else if (const auto *block = dynamic_cast<const BlockStmtNode *>(&stmt)) {
+        for (const auto &s : block->statements) {
+            collectLabels(*s, labels, duplicates);
+        }
+    } else if (const auto *ifStmt = dynamic_cast<const IfStmtNode *>(&stmt)) {
+        collectLabels(*ifStmt->thenBlock, labels, duplicates);
+        if (ifStmt->elseBlock) {
+            collectLabels(*ifStmt->elseBlock, labels, duplicates);
+        }
+    } else if (const auto *whileStmt = dynamic_cast<const WhileStmtNode *>(&stmt)) {
+        collectLabels(*whileStmt->body, labels, duplicates);
+    } else if (const auto *doWhile = dynamic_cast<const DoWhileStmtNode *>(&stmt)) {
+        collectLabels(*doWhile->body, labels, duplicates);
+    } else if (const auto *forStmt = dynamic_cast<const ForStmtNode *>(&stmt)) {
+        collectLabels(*forStmt->body, labels, duplicates);
+    } else if (const auto *switchStmt = dynamic_cast<const SwitchStmtNode *>(&stmt)) {
+        collectLabels(*switchStmt->body, labels, duplicates);
+    }
 }
 
 void SemanticAnalyzer::checkReturn(const ReturnStmtNode &stmt) {

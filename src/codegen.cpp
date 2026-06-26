@@ -288,6 +288,11 @@ private:
         scopes_.clear();
         enterScope();
 
+        // Pre-pass so a `goto` can branch to a label's block before that
+        // block has actually been filled in (forward jump).
+        labelBlocks_.clear();
+        collectLabelBlocks(*func.body, llvmFunc);
+
         std::size_t index = 0;
         for (auto &arg : llvmFunc->args()) {
             const ParamNode &param = func.params[index++];
@@ -406,6 +411,18 @@ private:
                 throw std::runtime_error(locationString(stmt.location) + ": continue outside loop reached codegen");
             }
             builder_.CreateBr(continueTargets_.back());
+        } else if (const auto *doWhile = dynamic_cast<const DoWhileStmtNode *>(&stmt)) {
+            emitDoWhile(*doWhile);
+        } else if (const auto *switchStmt = dynamic_cast<const SwitchStmtNode *>(&stmt)) {
+            emitSwitch(*switchStmt);
+        } else if (const auto *label = dynamic_cast<const LabelStmtNode *>(&stmt)) {
+            llvm::BasicBlock *target = labelBlocks_.at(label->name);
+            if (!currentBlockTerminated()) {
+                builder_.CreateBr(target);
+            }
+            builder_.SetInsertPoint(target);
+        } else if (const auto *gotoStmt = dynamic_cast<const GotoStmtNode *>(&stmt)) {
+            builder_.CreateBr(labelBlocks_.at(gotoStmt->name));
         } else if (const auto *block = dynamic_cast<const BlockStmtNode *>(&stmt)) {
             emitBlock(*block);
         } else {
@@ -543,6 +560,115 @@ private:
 
         builder_.SetInsertPoint(afterBlock);
         exitScope();
+    }
+
+    void emitDoWhile(const DoWhileStmtNode &stmt) {
+        llvm::Function *func = builder_.GetInsertBlock()->getParent();
+        auto *bodyBlock = llvm::BasicBlock::Create(context_, "dowhile.body", func);
+        auto *condBlock = llvm::BasicBlock::Create(context_, "dowhile.cond", func);
+        auto *afterBlock = llvm::BasicBlock::Create(context_, "dowhile.end", func);
+
+        builder_.CreateBr(bodyBlock);
+
+        builder_.SetInsertPoint(bodyBlock);
+        breakTargets_.push_back(afterBlock);
+        continueTargets_.push_back(condBlock);
+        emitBlock(*stmt.body);
+        continueTargets_.pop_back();
+        breakTargets_.pop_back();
+        if (!currentBlockTerminated()) {
+            builder_.CreateBr(condBlock);
+        }
+
+        builder_.SetInsertPoint(condBlock);
+        TypedValue condition = emitExpr(*stmt.condition);
+        builder_.CreateCondBr(toBool(condition), bodyBlock, afterBlock);
+
+        builder_.SetInsertPoint(afterBlock);
+    }
+
+    void emitSwitch(const SwitchStmtNode &stmt) {
+        llvm::Function *func = builder_.GetInsertBlock()->getParent();
+        TypedValue value = emitExpr(*stmt.value);
+        llvm::Value *discriminant = castNumeric(value.value, value.type, Type::Int);
+
+        auto *afterBlock = llvm::BasicBlock::Create(context_, "switch.end", func);
+
+        // One basic block per case/default label, created up front so the
+        // SwitchInst below can reference all of them.
+        std::vector<std::pair<long long, llvm::BasicBlock *>> caseBlocks;
+        llvm::BasicBlock *defaultBlock = nullptr;
+        for (const auto &s : stmt.body->statements) {
+            if (const auto *caseLabel = dynamic_cast<const CaseLabelStmtNode *>(s.get())) {
+                caseBlocks.emplace_back(caseLabel->value, llvm::BasicBlock::Create(context_, "switch.case", func));
+            } else if (dynamic_cast<const DefaultLabelStmtNode *>(s.get())) {
+                defaultBlock = llvm::BasicBlock::Create(context_, "switch.default", func);
+            }
+        }
+
+        llvm::SwitchInst *sw = builder_.CreateSwitch(discriminant, defaultBlock ? defaultBlock : afterBlock,
+                                                     static_cast<unsigned>(caseBlocks.size()));
+        for (const auto &caseBlock : caseBlocks) {
+            sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), caseBlock.first, true),
+                       caseBlock.second);
+        }
+
+        // Emit the body as a flat, fallthrough sequence: each case/default
+        // label switches the insert point to its pre-made block (branching
+        // into it first if the previous segment didn't already end in a
+        // `break`/`return`, i.e. fell through); regular statements between
+        // labels are emitted into whichever block is currently active.
+        breakTargets_.push_back(afterBlock);
+        std::size_t nextCaseIndex = 0;
+        for (const auto &s : stmt.body->statements) {
+            if (dynamic_cast<const CaseLabelStmtNode *>(s.get())) {
+                llvm::BasicBlock *target = caseBlocks[nextCaseIndex++].second;
+                if (!currentBlockTerminated()) {
+                    builder_.CreateBr(target);
+                }
+                builder_.SetInsertPoint(target);
+            } else if (dynamic_cast<const DefaultLabelStmtNode *>(s.get())) {
+                if (!currentBlockTerminated()) {
+                    builder_.CreateBr(defaultBlock);
+                }
+                builder_.SetInsertPoint(defaultBlock);
+            } else if (!currentBlockTerminated()) {
+                emitStmt(*s);
+            }
+        }
+        if (!currentBlockTerminated()) {
+            builder_.CreateBr(afterBlock);
+        }
+        breakTargets_.pop_back();
+
+        builder_.SetInsertPoint(afterBlock);
+    }
+
+    // Pre-pass for collectLabelBlocks: recurses into every nested
+    // block/loop/switch in `stmt` (mirroring SemanticAnalyzer::collectLabels)
+    // so a `goto` can branch to a label's block before that block has
+    // actually been filled in.
+    void collectLabelBlocks(const StmtNode &stmt, llvm::Function *func) {
+        if (const auto *label = dynamic_cast<const LabelStmtNode *>(&stmt)) {
+            labelBlocks_[label->name] = llvm::BasicBlock::Create(context_, "label." + label->name, func);
+        } else if (const auto *block = dynamic_cast<const BlockStmtNode *>(&stmt)) {
+            for (const auto &s : block->statements) {
+                collectLabelBlocks(*s, func);
+            }
+        } else if (const auto *ifStmt = dynamic_cast<const IfStmtNode *>(&stmt)) {
+            collectLabelBlocks(*ifStmt->thenBlock, func);
+            if (ifStmt->elseBlock) {
+                collectLabelBlocks(*ifStmt->elseBlock, func);
+            }
+        } else if (const auto *whileStmt = dynamic_cast<const WhileStmtNode *>(&stmt)) {
+            collectLabelBlocks(*whileStmt->body, func);
+        } else if (const auto *doWhile = dynamic_cast<const DoWhileStmtNode *>(&stmt)) {
+            collectLabelBlocks(*doWhile->body, func);
+        } else if (const auto *forStmt = dynamic_cast<const ForStmtNode *>(&stmt)) {
+            collectLabelBlocks(*forStmt->body, func);
+        } else if (const auto *switchStmt = dynamic_cast<const SwitchStmtNode *>(&stmt)) {
+            collectLabelBlocks(*switchStmt->body, func);
+        }
     }
 
     void emitReturn(const ReturnStmtNode &stmt) {
@@ -1087,6 +1213,7 @@ private:
     std::vector<std::unordered_map<std::string, Variable>> scopes_;
     std::vector<llvm::BasicBlock *> breakTargets_;
     std::vector<llvm::BasicBlock *> continueTargets_;
+    std::unordered_map<std::string, llvm::BasicBlock *> labelBlocks_;
     const FuncDefNode *currentFunctionAst_ = nullptr;
     int optLevel_ = 0;
 };

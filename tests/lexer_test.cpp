@@ -204,6 +204,44 @@ int main() {
         });
 
     expectTypes(
+        "do { x++; } while (x < 3); switch (x) { case 1: break; default: goto end; } end: ;",
+        {
+            TokenType::Do,
+            TokenType::LeftBrace,
+            TokenType::Identifier,
+            TokenType::PlusPlus,
+            TokenType::Semicolon,
+            TokenType::RightBrace,
+            TokenType::While,
+            TokenType::LeftParen,
+            TokenType::Identifier,
+            TokenType::Less,
+            TokenType::IntLiteral,
+            TokenType::RightParen,
+            TokenType::Semicolon,
+            TokenType::Switch,
+            TokenType::LeftParen,
+            TokenType::Identifier,
+            TokenType::RightParen,
+            TokenType::LeftBrace,
+            TokenType::Case,
+            TokenType::IntLiteral,
+            TokenType::Colon,
+            TokenType::Break,
+            TokenType::Semicolon,
+            TokenType::Default,
+            TokenType::Colon,
+            TokenType::Goto,
+            TokenType::Identifier,
+            TokenType::Semicolon,
+            TokenType::RightBrace,
+            TokenType::Identifier,
+            TokenType::Colon,
+            TokenType::Semicolon,
+            TokenType::EndOfFile,
+        });
+
+    expectTypes(
         "int *p = &x; int y = *p;",
         {
             TokenType::Int,

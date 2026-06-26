@@ -26,6 +26,10 @@ statement    ::= var_decl
                | if_stmt
                | while_stmt
                | for_stmt
+               | do_while_stmt
+               | switch_stmt
+               | goto_stmt
+               | label_stmt
                | return_stmt
                | break_stmt
                | continue_stmt
@@ -48,9 +52,17 @@ for_init     ::= var_decl_no_semi | simple_stmt_no_semi
 // pointless), matching C.
 simple_stmt_no_semi ::= lvalue assign_op expression | expression
 
+do_while_stmt ::= "do" block "while" "(" expression ")" ";"
+switch_stmt  ::= "switch" "(" expression ")" "{" switch_item* "}"
+// case/default labels are only recognized directly in a switch's body —
+// not nested inside an if/while/etc. within it (no "Duff's device").
+switch_item  ::= ("case" "-"? int_lit ":" | "default" ":" | statement)
+goto_stmt    ::= "goto" identifier ";"
+label_stmt   ::= identifier ":"
+
 return_stmt  ::= "return" expression? ";"
-break_stmt   ::= "break" ";"
-continue_stmt ::= "continue" ";"
+break_stmt   ::= "break" ";"  // exits the innermost loop OR switch
+continue_stmt ::= "continue" ";"  // re-enters the innermost loop only
 
 type         ::= ("int" | "float" | "char" | "void"
                   | "struct" identifier | "union" identifier | "enum" identifier) "*"*
@@ -236,6 +248,61 @@ for (int i = 0; i < n; i = i + 1) {
 }
 ```
 
+**do_while_stmt** — like `while`, but the condition is checked *after* the
+body, so the body always runs at least once. The condition is checked in
+the scope *outside* the body block (a variable declared in the body is
+already out of scope by the time the condition runs).
+
+```c
+int i = 0;
+do {
+    i = i + 1;
+} while (i < 3);
+```
+
+**switch_stmt** — `case`/`default` labels split the body into a flat,
+fallthrough sequence, exactly like C: control runs from one labeled segment
+into the next unless something (usually `break`) exits the switch first.
+Each `case` value must be a (optionally negated) integer literal, and all
+case values in one switch must be distinct; at most one `default` is
+allowed. The switch's value must have an integer type (`int` or `char`).
+Labels are only recognized directly in the switch's body — not nested
+inside an `if`/`while`/etc. within it (the rare "Duff's device" idiom is
+not supported).
+
+```c
+switch (n) {
+case 0:
+    printf("zero\n");
+    break;
+case 1:
+case 2:
+    printf("one or two\n");
+    break;
+default:
+    printf("other\n");
+}
+```
+
+**goto_stmt / label_stmt** — `goto` transfers control directly to a label
+in the same function, forward or backward, crossing in or out of nested
+blocks/loops/switches freely (sema resolves every label in the function
+before checking any `goto`, so forward jumps work). A label's name shares
+the same scope as the rest of the function; duplicate label names are an
+error, as is a `goto` to a name that's never declared as a label anywhere
+in the function. There's no restriction against jumping into a block past
+a variable's declaration (a real C compiler would flag some such jumps;
+MiniC doesn't).
+
+```c
+int n = 0;
+retry:
+n = n + 1;
+if (n < 3) {
+    goto retry;
+}
+```
+
 **return_stmt** — exits the current function, optionally with a value. A
 `void` function uses `return;`; a non-`void` function must supply an
 expression matching the declared return type.
@@ -246,9 +313,11 @@ return fibonacci(n - 1) + fibonacci(n - 2);
 return;    // valid only in a void function
 ```
 
-**break_stmt / continue_stmt** — `break` exits the innermost enclosing
-loop; `continue` jumps to the loop condition (for `while`) or the update
-clause (for `for`). Both are errors outside a loop.
+**break_stmt / continue_stmt** — `break` exits the innermost enclosing loop
+*or* `switch`; `continue` jumps to the loop condition (for `while`/`do`-`while`)
+or the update clause (for `for`) of the innermost enclosing **loop**
+specifically — a `switch` doesn't count as a loop for `continue`, so
+`continue` inside a `switch` with no enclosing loop is still an error.
 
 ```c
 while (1) {
@@ -630,8 +699,14 @@ while (n) { ... }   // ok: exits when n == 0
 - `FuncDefNode`, `ParamNode`, `AggregateDeclNode`, `FieldNode`,
   `EnumDeclNode`, `EnumeratorNode` — top-level structure
 - `BlockStmtNode`, `VarDeclStmtNode`, `AssignStmtNode`, `ExprStmtNode`,
-  `IfStmtNode`, `WhileStmtNode`, `ForStmtNode`, `ReturnStmtNode`,
-  `BreakStmtNode`, `ContinueStmtNode` — statements
+  `IfStmtNode`, `WhileStmtNode`, `ForStmtNode`, `DoWhileStmtNode`,
+  `SwitchStmtNode`, `CaseLabelStmtNode`, `DefaultLabelStmtNode`,
+  `LabelStmtNode`, `GotoStmtNode`, `ReturnStmtNode`, `BreakStmtNode`,
+  `ContinueStmtNode` — statements. `SwitchStmtNode::body` is a flat
+  `BlockStmtNode` whose direct statements mix regular statements with
+  `CaseLabelStmtNode`/`DefaultLabelStmtNode` markers — the same shape as
+  the C grammar's fallthrough semantics, so codegen can emit the body as
+  one sequential pass that just switches basic blocks at each marker.
 - `BinOpExprNode`, `UnaryOpExprNode`, `CallExprNode`, `IdentExprNode`,
   `IndexExprNode`, `MemberExprNode`, `TernaryExprNode`, `IncDecExprNode`,
   `IntLitExprNode`, `FloatLitExprNode`, `CharLitExprNode`,

@@ -339,6 +339,61 @@ void ContinueStmtNode::print(std::ostream &out, int indent) const {
     out << "Continue\n";
 }
 
+DoWhileStmtNode::DoWhileStmtNode(SourceLocation location, std::unique_ptr<BlockStmtNode> body, ExprPtr condition)
+    : StmtNode(std::move(location)), body(std::move(body)), condition(std::move(condition)) {}
+
+void DoWhileStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "DoWhile\n";
+    printIndent(out, indent + 1);
+    out << "Body\n";
+    body->print(out, indent + 2);
+    printIndent(out, indent + 1);
+    out << "Cond\n";
+    condition->print(out, indent + 2);
+}
+
+CaseLabelStmtNode::CaseLabelStmtNode(SourceLocation location, long long value)
+    : StmtNode(std::move(location)), value(value) {}
+
+void CaseLabelStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Case " << value << '\n';
+}
+
+DefaultLabelStmtNode::DefaultLabelStmtNode(SourceLocation location) : StmtNode(std::move(location)) {}
+
+void DefaultLabelStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Default\n";
+}
+
+SwitchStmtNode::SwitchStmtNode(SourceLocation location, ExprPtr value, std::unique_ptr<BlockStmtNode> body)
+    : StmtNode(std::move(location)), value(std::move(value)), body(std::move(body)) {}
+
+void SwitchStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Switch\n";
+    value->print(out, indent + 1);
+    body->print(out, indent + 1);
+}
+
+LabelStmtNode::LabelStmtNode(SourceLocation location, std::string name)
+    : StmtNode(std::move(location)), name(std::move(name)) {}
+
+void LabelStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Label " << name << '\n';
+}
+
+GotoStmtNode::GotoStmtNode(SourceLocation location, std::string name)
+    : StmtNode(std::move(location)), name(std::move(name)) {}
+
+void GotoStmtNode::print(std::ostream &out, int indent) const {
+    printIndent(out, indent);
+    out << "Goto " << name << '\n';
+}
+
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------

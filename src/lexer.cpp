@@ -21,6 +21,16 @@ const std::unordered_map<std::string, TokenType> kKeywords = {
     {"return", TokenType::Return},
     {"break", TokenType::Break},
     {"continue", TokenType::Continue},
+    {"do", TokenType::Do},
+    {"switch", TokenType::Switch},
+    {"case", TokenType::Case},
+    {"default", TokenType::Default},
+    {"goto", TokenType::Goto},
+    {"sizeof", TokenType::Sizeof},
+    {"const", TokenType::Const},
+    {"static", TokenType::Static},
+    {"extern", TokenType::Extern},
+    {"volatile", TokenType::Volatile},
     {"struct", TokenType::Struct},
     {"union", TokenType::Union},
     {"enum", TokenType::Enum},
@@ -49,6 +59,16 @@ std::string tokenTypeName(TokenType type) {
     case TokenType::Return: return "TOK_RETURN";
     case TokenType::Break: return "TOK_BREAK";
     case TokenType::Continue: return "TOK_CONTINUE";
+    case TokenType::Do: return "TOK_DO";
+    case TokenType::Switch: return "TOK_SWITCH";
+    case TokenType::Case: return "TOK_CASE";
+    case TokenType::Default: return "TOK_DEFAULT";
+    case TokenType::Goto: return "TOK_GOTO";
+    case TokenType::Sizeof: return "TOK_SIZEOF";
+    case TokenType::Const: return "TOK_CONST";
+    case TokenType::Static: return "TOK_STATIC";
+    case TokenType::Extern: return "TOK_EXTERN";
+    case TokenType::Volatile: return "TOK_VOLATILE";
     case TokenType::Struct: return "TOK_STRUCT";
     case TokenType::Union: return "TOK_UNION";
     case TokenType::Enum: return "TOK_ENUM";

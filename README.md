@@ -51,8 +51,7 @@ scope is fully supported; anything outside scope is a clear compile error.
 any of those (`int *`, `float **`, ...), fixed-size single-dimension arrays
 (`int arr[10]`), and named structs/unions/enums (`struct Point`, `union
 Number`, `enum Color`). See [docs/ROADMAP.md](docs/ROADMAP.md) for what's
-still missing (`switch`, casts, `sizeof`, storage classes, function
-prototypes).
+still missing (casts, `sizeof`, storage classes, function prototypes).
 
 **Variables and pointers**
 Local variable declarations with initializers (`int x = 5;`),
@@ -105,8 +104,14 @@ can never collide with the unrelated comma in call-argument or parameter
 lists. No `%`/`%=` (no modulo operator).
 
 **Control flow**
-`if`/`else`, `while`, and `for` loops. Nested control flow is fully
-supported. `break` and `continue` inside loops.
+`if`/`else`, `while`, `for`, and `do`-`while` loops, nested freely.
+`switch`/`case`/`default` with real fallthrough (compiles to LLVM's native
+`switch` instruction — one basic block per case, `break` to exit, no
+implicit break between cases, just like C). `goto`/labels, forward or
+backward, anywhere in the same function (sema resolves every label before
+checking any `goto`, so forward jumps work). `break` exits the innermost
+loop *or* switch; `continue` re-enters the innermost loop specifically (a
+switch doesn't count, matching C).
 
 **Functions**
 Function declarations with typed parameters and return types, function
@@ -301,7 +306,7 @@ Total Test time (real) =   1.5 sec
 | `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
 | `parser_test` | AST shape for every grammar construct, plus parse-error messages |
 | `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `codegen_test` | Compiles and **runs** all eight example programs through the full pipeline, asserting on exact stdout |
+| `codegen_test` | Compiles and **runs** all nine example programs through the full pipeline, asserting on exact stdout |
 | `smoke_test` | End-to-end CLI sanity check |
 
 **Output correctness is cross-validated against clang.** Every example
@@ -317,6 +322,7 @@ pointer_swap: IDENTICAL
 array_sum: IDENTICAL
 struct_point: IDENTICAL
 bit_ops: IDENTICAL
+control_flow: IDENTICAL
 ```
 
 ### Bug hunt and hardening
@@ -396,7 +402,8 @@ minic-compiler/
 │   ├── pointer_swap.mc
 │   ├── array_sum.mc
 │   ├── struct_point.mc
-│   └── bit_ops.mc
+│   ├── bit_ops.mc
+│   └── control_flow.mc
 └── docs/
     ├── ROADMAP.md           ← build plan + language-coverage roadmap
     ├── language_spec.md     ← BNF grammar + type rules

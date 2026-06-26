@@ -72,7 +72,8 @@ int main() {
 
     // Every example program is well-typed: zero diagnostics.
     for (const std::string &name : {"fibonacci.mc", "gcd.mc", "fizzbuzz.mc", "sum_of_squares.mc",
-                                     "pointer_swap.mc", "array_sum.mc", "struct_point.mc", "bit_ops.mc"}) {
+                                     "pointer_swap.mc", "array_sum.mc", "struct_point.mc", "bit_ops.mc",
+                                     "control_flow.mc"}) {
         const auto diags = analyzeFile(examplesDir + "/" + name);
         if (!diags.empty()) {
             for (const auto &diag : diags) {
@@ -522,6 +523,134 @@ int main() {
                                           "    return 0;\n"
                                           "}\n");
         assert(hasError(diags, "invalid operands to binary '+'"));
+    }
+
+    // do-while, switch (with fallthrough), break inside a switch, and
+    // goto/labels (forward and backward) are all well-typed.
+    {
+        const auto diags = analyzeSource(
+            "int main() {\n"
+            "    int i = 0;\n"
+            "    do {\n"
+            "        i++;\n"
+            "    } while (i < 3);\n"
+            "\n"
+            "    switch (i) {\n"
+            "    case 0:\n"
+            "    case 1:\n"
+            "        i = 1;\n"
+            "        break;\n"
+            "    default:\n"
+            "        i = 2;\n"
+            "    }\n"
+            "\n"
+            "    int n = 0;\n"
+            "top:\n"
+            "    n++;\n"
+            "    if (n < 3) {\n"
+            "        goto top;\n"
+            "    }\n"
+            "    goto bottom;\n"
+            "bottom:\n"
+            "    return n;\n"
+            "}\n");
+        assert(diags.empty());
+    }
+
+    // do-while's condition is checked in the outer scope, not the body's.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    do {\n"
+                                          "        int x = 1;\n"
+                                          "    } while (x > 0);\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(hasError(diags, "use of undeclared variable 'x'"));
+    }
+
+    // A switch's value must be an integer type.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    float f = 1.5;\n"
+                                          "    switch (f) {\n"
+                                          "    case 0:\n"
+                                          "        return 0;\n"
+                                          "    }\n"
+                                          "    return 1;\n"
+                                          "}\n");
+        assert(hasError(diags, "switch value must have an integer type"));
+    }
+
+    // Duplicate case values are an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    switch (1) {\n"
+                                          "    case 1:\n"
+                                          "        return 0;\n"
+                                          "    case 1:\n"
+                                          "        return 1;\n"
+                                          "    }\n"
+                                          "    return 2;\n"
+                                          "}\n");
+        assert(hasError(diags, "duplicate case value '1'"));
+    }
+
+    // More than one 'default' label is an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    switch (1) {\n"
+                                          "    default:\n"
+                                          "        return 0;\n"
+                                          "    default:\n"
+                                          "        return 1;\n"
+                                          "    }\n"
+                                          "}\n");
+        assert(hasError(diags, "multiple 'default' labels"));
+    }
+
+    // 'break' now works inside a switch even with no enclosing loop.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    switch (1) {\n"
+                                          "    case 1:\n"
+                                          "        break;\n"
+                                          "    }\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(diags.empty());
+    }
+
+    // 'continue' inside a switch with no enclosing loop is still an error
+    // (a switch is not a loop for 'continue' purposes).
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    switch (1) {\n"
+                                          "    case 1:\n"
+                                          "        continue;\n"
+                                          "    }\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(hasError(diags, "'continue' statement not within a loop"));
+    }
+
+    // goto to an undeclared label is an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "    goto nowhere;\n"
+                                          "    return 0;\n"
+                                          "}\n");
+        assert(hasError(diags, "use of undeclared label 'nowhere'"));
+    }
+
+    // Duplicate labels in one function are an error.
+    {
+        const auto diags = analyzeSource("int main() {\n"
+                                          "top:\n"
+                                          "    return 0;\n"
+                                          "top:\n"
+                                          "    return 1;\n"
+                                          "}\n");
+        assert(hasError(diags, "duplicate label 'top'"));
     }
 
     // Redefinition of a function.

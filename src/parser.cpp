@@ -314,7 +314,23 @@ StmtPtr Parser::parseStatement() {
         return parseBreak();
     case TokenType::Continue:
         return parseContinue();
+    case TokenType::Do:
+        return parseDoWhile();
+    case TokenType::Switch:
+        return parseSwitch();
+    case TokenType::Case:
+        return parseCaseLabel();
+    case TokenType::Default:
+        return parseDefaultLabel();
+    case TokenType::Goto:
+        return parseGoto();
     case TokenType::Identifier:
+        // `name:` is a goto label; anything else starting with an
+        // identifier is an assignment or call/inc-dec expression statement.
+        if (peek(1).type == TokenType::Colon) {
+            return parseLabel();
+        }
+        return parseAssignOrExprStmt();
     case TokenType::Star:
     case TokenType::PlusPlus:
     case TokenType::MinusMinus:
@@ -502,6 +518,54 @@ StmtPtr Parser::parseContinue() {
     const Token &continueTok = expect(TokenType::Continue, "expected 'continue'");
     expect(TokenType::Semicolon, "expected ';' after 'continue'");
     return std::make_unique<ContinueStmtNode>(continueTok.location);
+}
+
+StmtPtr Parser::parseDoWhile() {
+    const Token &doTok = expect(TokenType::Do, "expected 'do'");
+    auto body = parseBlock();
+    expect(TokenType::While, "expected 'while' after 'do' block");
+    expect(TokenType::LeftParen, "expected '(' after 'while'");
+    ExprPtr condition = parseExpression();
+    expect(TokenType::RightParen, "expected ')' after condition");
+    expect(TokenType::Semicolon, "expected ';' after do-while statement");
+    return std::make_unique<DoWhileStmtNode>(doTok.location, std::move(body), std::move(condition));
+}
+
+StmtPtr Parser::parseSwitch() {
+    const Token &switchTok = expect(TokenType::Switch, "expected 'switch'");
+    expect(TokenType::LeftParen, "expected '(' after 'switch'");
+    ExprPtr value = parseExpression();
+    expect(TokenType::RightParen, "expected ')' after switch value");
+    auto body = parseBlock();
+    return std::make_unique<SwitchStmtNode>(switchTok.location, std::move(value), std::move(body));
+}
+
+StmtPtr Parser::parseCaseLabel() {
+    const Token &caseTok = expect(TokenType::Case, "expected 'case'");
+    const bool negative = match(TokenType::Minus);
+    const Token &valueTok = expect(TokenType::IntLiteral, "expected integer constant after 'case'");
+    long long value = std::stoll(valueTok.lexeme);
+    expect(TokenType::Colon, "expected ':' after case value");
+    return std::make_unique<CaseLabelStmtNode>(caseTok.location, negative ? -value : value);
+}
+
+StmtPtr Parser::parseDefaultLabel() {
+    const Token &defaultTok = expect(TokenType::Default, "expected 'default'");
+    expect(TokenType::Colon, "expected ':' after 'default'");
+    return std::make_unique<DefaultLabelStmtNode>(defaultTok.location);
+}
+
+StmtPtr Parser::parseGoto() {
+    const Token &gotoTok = expect(TokenType::Goto, "expected 'goto'");
+    const Token &nameTok = expect(TokenType::Identifier, "expected label name after 'goto'");
+    expect(TokenType::Semicolon, "expected ';' after 'goto' statement");
+    return std::make_unique<GotoStmtNode>(gotoTok.location, nameTok.lexeme);
+}
+
+StmtPtr Parser::parseLabel() {
+    const Token &nameTok = expect(TokenType::Identifier, "expected label name");
+    expect(TokenType::Colon, "expected ':' after label name");
+    return std::make_unique<LabelStmtNode>(nameTok.location, nameTok.lexeme);
 }
 
 // ---------------------------------------------------------------------------

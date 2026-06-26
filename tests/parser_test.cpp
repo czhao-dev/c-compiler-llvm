@@ -372,6 +372,72 @@ int main() {
         assert(outerComma != nullptr && outerComma->op == minic::BinaryOp::Comma);
     }
 
+    // do-while, switch/case/default (with fallthrough), and goto/labels.
+    {
+        auto program = parseSource(
+            "int main() {\n"
+            "    int i = 0;\n"
+            "    do {\n"
+            "        i++;\n"
+            "    } while (i < 3);\n"
+            "\n"
+            "    switch (i) {\n"
+            "    case 0:\n"
+            "    case 1:\n"
+            "        i = 1;\n"
+            "        break;\n"
+            "    default:\n"
+            "        i = 2;\n"
+            "    }\n"
+            "\n"
+            "    int n = 0;\n"
+            "top:\n"
+            "    n++;\n"
+            "    if (n < 3) {\n"
+            "        goto top;\n"
+            "    }\n"
+            "    return n;\n"
+            "}\n");
+
+        const auto &body = program.functions[0]->body->statements;
+        const auto *doWhile = dynamic_cast<minic::DoWhileStmtNode *>(body[1].get());
+        assert(doWhile != nullptr);
+        assert(dynamic_cast<minic::BinOpExprNode *>(doWhile->condition.get())->op == minic::BinaryOp::Lt);
+
+        const auto *switchStmt = dynamic_cast<minic::SwitchStmtNode *>(body[2].get());
+        assert(switchStmt != nullptr);
+        const auto &switchBody = switchStmt->body->statements;
+        assert(dynamic_cast<minic::CaseLabelStmtNode *>(switchBody[0].get())->value == 0);
+        assert(dynamic_cast<minic::CaseLabelStmtNode *>(switchBody[1].get())->value == 1);
+        assert(dynamic_cast<minic::DefaultLabelStmtNode *>(switchBody[4].get()) != nullptr);
+
+        const auto *label = dynamic_cast<minic::LabelStmtNode *>(body[4].get());
+        assert(label != nullptr && label->name == "top");
+
+        std::ostringstream out;
+        program.print(out);
+        const std::string ast = out.str();
+        assert(ast.find("DoWhile") != std::string::npos);
+        assert(ast.find("Switch") != std::string::npos);
+        assert(ast.find("Case 0") != std::string::npos);
+        assert(ast.find("Default") != std::string::npos);
+        assert(ast.find("Label top") != std::string::npos);
+        assert(ast.find("Goto top") != std::string::npos);
+    }
+
+    // A negative case label.
+    {
+        auto program = parseSource("int main() {\n"
+                                    "    switch (1) {\n"
+                                    "    case -1:\n"
+                                    "        return 0;\n"
+                                    "    }\n"
+                                    "    return 1;\n"
+                                    "}\n");
+        const auto *switchStmt = dynamic_cast<minic::SwitchStmtNode *>(program.functions[0]->body->statements[0].get());
+        assert(dynamic_cast<minic::CaseLabelStmtNode *>(switchStmt->body->statements[0].get())->value == -1);
+    }
+
     // Syntax errors are reported with file:line:column.
     {
         bool threw = false;

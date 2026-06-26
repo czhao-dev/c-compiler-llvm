@@ -66,6 +66,12 @@ private:
     StmtPtr parseReturn();
     StmtPtr parseBreak();
     StmtPtr parseContinue();
+    StmtPtr parseDoWhile();
+    StmtPtr parseSwitch();
+    StmtPtr parseCaseLabel();
+    StmtPtr parseDefaultLabel();
+    StmtPtr parseGoto();
+    StmtPtr parseLabel();
 
     // True for a binary operator's assignment form (+=, &=, etc.); maps it
     // to the BinaryOp it desugars through in a compound AssignStmtNode.
