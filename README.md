@@ -11,6 +11,23 @@
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Supported Language Features](#supported-language-features)
+- [Example MiniC Programs](#example-minic-programs)
+- [Pipeline Architecture](#pipeline-architecture)
+- [Pipeline Walkthrough — fibonacci(5)](#pipeline-walkthrough--fibonacci5)
+- [Testing & Validation](#testing--validation)
+- [Optimization](#optimization)
+- [Error Messages](#error-messages)
+- [Repo Structure](#repo-structure)
+- [Build & Run](#build--run)
+- [License](#license)
+- [References](#references)
+
+---
+
 ## Overview
 
 MiniC takes C source files written in a well-defined subset of the language
@@ -38,6 +55,10 @@ language-coverage roadmap, and
 
 **CLI flags:** `--emit-tokens`, `--emit-ast`, `--emit-ir`,
 `-O0`/`-O1`/`-O2`/`-O3`, `-o`.
+
+The compiler is structured as a static library (`libminic_core.a`) with a
+thin `main.cpp` CLI on top, making it easy to embed in test harnesses or
+tooling without going through the command-line interface.
 
 ---
 
@@ -201,6 +222,15 @@ Source file (.mc)
     Native Binary
 ```
 
+Each stage is cleanly separated: the lexer exposes a `TokenStream`, the
+parser consumes it and returns an `ASTNode*` tree, the semantic analyzer
+decorates that tree with resolved types in a single pass, and the IR
+generator walks the decorated tree to emit LLVM IR via `IRBuilder<>`. The
+LLVM backend (invoked via `clang`) handles register allocation, instruction
+selection, and object linking. The core pipeline is compiled into
+`libminic_core.a`, which the test suites link against directly without
+going through the CLI.
+
 ---
 
 ## Pipeline Walkthrough — fibonacci(5)
@@ -282,64 +312,78 @@ double-comparison into a single `icmp slt`, and the optimizer converts the
 
 Every pipeline stage has its own test executable, built with nothing more
 than `<cassert>` — no external test framework, so the build stays hermetic
-and `ctest` is the only thing a contributor needs to run. All 5 suites pass:
+and `ctest` is the only runner a contributor needs. **All 5 suites pass.**
+
+### Test suite results
 
 ```
-$ ctest --test-dir build
-    Start 1: lexer_test
-1/5 Test #1: lexer_test .......................   Passed
-    Start 2: smoke_test
-2/5 Test #2: smoke_test .......................   Passed
-    Start 3: parser_test
-3/5 Test #3: parser_test ......................   Passed
-    Start 4: sema_test
-4/5 Test #4: sema_test ........................   Passed
-    Start 5: codegen_test
-5/5 Test #5: codegen_test .....................   Passed
+$ ctest --test-dir build --output-on-failure
+Test project /path/to/c-compiler-llvm/build
+
+      Start 1: lexer_test
+  1/5 Test  #1: lexer_test    ........  Passed    0.06 sec
+
+      Start 2: smoke_test
+  2/5 Test  #2: smoke_test    ........  Passed    0.32 sec
+
+      Start 3: parser_test
+  3/5 Test  #3: parser_test   ........  Passed    0.04 sec
+
+      Start 4: sema_test
+  4/5 Test  #4: sema_test     ........  Passed    0.05 sec
+
+      Start 5: codegen_test
+  5/5 Test  #5: codegen_test  ........  Passed    0.98 sec
 
 100% tests passed, 0 tests failed out of 5
-Total Test time (real) =   1.5 sec
+Total Test time (real) =   1.47 sec
 ```
 
-| Suite | What it exercises |
-|---|---|
-| `lexer_test` | Token stream shape for keywords, operators, literals, escapes, and comments |
-| `parser_test` | AST shape for every grammar construct, plus parse-error messages |
-| `sema_test` | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, argument-count mismatches, return-type checks |
-| `codegen_test` | Compiles and **runs** all nine example programs through the full pipeline, asserting on exact stdout |
-| `smoke_test` | End-to-end CLI sanity check |
+### What each suite covers
 
-**Output correctness is cross-validated against clang.** Every example
-program is compiled twice — once through `minic`, once through
-`clang -x c` on the same `.mc` source — and the two binaries are diffed:
+| Suite | Stage tested | What it checks |
+|---|---|---|
+| `lexer_test` | Lexer | Token stream shape for keywords, operators, numeric/string/char literals, escape sequences, and block/line comments |
+| `parser_test` | Parser | AST node shape and nesting for every grammar construct; error message text for malformed input |
+| `sema_test` | Semantic analyzer | Every diagnostic the type checker can produce — undeclared identifiers, type mismatches, wrong argument counts, return-type mismatches |
+| `codegen_test` | Full pipeline | Compiles and **runs** all nine example programs end-to-end, asserting on exact stdout against a known-good golden output |
+| `smoke_test` | CLI | End-to-end sanity check: `--emit-tokens`, `--emit-ast`, `--emit-ir`, and binary compilation all exit cleanly |
+
+### Output correctness — cross-validation against clang
+
+Every example program is compiled twice — once through `minic`, once through
+`clang -x c` on the same `.mc` source — and the two binaries' output is
+diffed. All nine programs produce byte-for-byte identical output:
 
 ```
-fibonacci: IDENTICAL
-fizzbuzz:  IDENTICAL
-gcd:       IDENTICAL
-sum_of_squares: IDENTICAL
-pointer_swap: IDENTICAL
-array_sum: IDENTICAL
-struct_point: IDENTICAL
-bit_ops: IDENTICAL
-control_flow: IDENTICAL
+Program           minic vs clang
+──────────────────────────────────
+fibonacci         IDENTICAL ✓
+fizzbuzz          IDENTICAL ✓
+gcd               IDENTICAL ✓
+sum_of_squares    IDENTICAL ✓
+pointer_swap      IDENTICAL ✓
+array_sum         IDENTICAL ✓
+struct_point      IDENTICAL ✓
+bit_ops           IDENTICAL ✓
+control_flow      IDENTICAL ✓
 ```
 
 ### Bug hunt and hardening
 
-A targeted correctness review across the lexer, parser, semantic analyzer,
-and code generator turned up — and fixed — four real defects:
+A targeted correctness review across all four pipeline stages turned up —
+and fixed — four real defects:
 
-| Bug | Root cause | Fix |
-|---|---|---|
-| Double, misordered diagnostics on bad assignments | `checkAssign` evaluated the RHS before checking whether the LHS was even declared, so `x = y;` with both undeclared printed the `y` error before the (more important) `x` error | Check the assignment target first; only evaluate the RHS afterward |
-| Temp `.ll` file leaked on write failure | `compileToNative` only deleted its temp file after a successful `clang` invocation — an `ofstream` open/write failure threw before cleanup ran | Delete the temp file on every throwing path, not just the success path |
-| `1.` and `1e5` failed to lex as floats | The lexer only recognized a `.` followed by a digit, with no exponent handling at all | Accept a bare trailing `.` and `[eE][+-]?[0-9]+` exponents in `lexNumber` |
-| sema/codegen type mismatch on `-charVar` | Sema typed unary negation on `char` as `char`; codegen sign-extended to `int` before negating and returned `int` — the two stages disagreed about the expression's type | Sema now returns `int` for negation on any non-float operand, matching codegen and C's integer-promotion rule |
+| # | Bug | Root cause | Fix |
+|---|---|---|---|
+| 1 | Double, misordered diagnostics on bad assignments | `checkAssign` evaluated the RHS before checking whether the LHS was even declared, so `x = y;` with both undeclared printed the `y` error before the (more important) `x` error | Check the assignment target first; only evaluate the RHS afterward |
+| 2 | Temp `.ll` file leaked on write failure | `compileToNative` only deleted its temp file after a successful `clang` invocation — an `ofstream` open/write failure threw before cleanup ran | Delete the temp file on every throwing path, not just the success path |
+| 3 | `1.` and `1e5` failed to lex as floats | The lexer only recognized a `.` followed by a digit, with no exponent handling at all | Accept a bare trailing `.` and `[eE][+-]?[0-9]+` exponents in `lexNumber` |
+| 4 | sema/codegen type mismatch on `-charVar` | Sema typed unary negation on `char` as `char`; codegen sign-extended to `int` before negating and returned `int` — the two stages disagreed about the expression's type | Sema now returns `int` for negation on any non-float operand, matching codegen and C's integer-promotion rule |
 
-Each fix was verified by hand-constructed regression cases before being
-folded back into the full test run above — all 5 suites and all 4
-example-vs-clang diffs still pass after the fix.
+Each fix was verified with a hand-constructed regression case before being
+folded back into the full test run above — all 5 suites and all 9
+clang-diff comparisons still pass after each fix.
 
 ---
 
@@ -351,7 +395,7 @@ handing it to the backend. The same optimized IR is shown by `--emit-ir`.
 
 Key transformations applied at `-O2` to `fibonacci.mc`:
 
-| Pass | Effect |
+| Pass | Effect on `fibonacci.mc` |
 |---|---|
 | `mem2reg` | Eliminates all `alloca`/`store`/`load` pairs; locals become SSA registers |
 | `instcombine` | Folds `zext i1 → i32; icmp ne, 0` into a single comparison |
@@ -361,115 +405,13 @@ Key transformations applied at `-O2` to `fibonacci.mc`:
 
 **Benchmark — `fibonacci(40)` on Apple M-series:**
 
-| Flag | Runtime |
-|---|---|
-| `-O0` | 0.39 s |
-| `-O2` | 0.28 s (**1.4× faster**) |
+| Flag | Runtime | Speedup |
+|---|---|---|
+| `-O0` | 0.39 s | baseline |
+| `-O2` | 0.28 s | **1.4×** |
 
 See [docs/ir_walkthrough.md](docs/ir_walkthrough.md) for annotated before/after
 IR listings explaining each transformation.
-
----
-
-## Repo Structure
-
-```
-minic-compiler/
-├── README.md
-├── include/
-│   ├── lexer.h
-│   ├── token.h
-│   ├── parser.h
-│   ├── ast.h
-│   ├── sema.h               ← semantic analyzer
-│   └── codegen.h
-├── src/
-│   ├── lexer.cpp
-│   ├── parser.cpp
-│   ├── sema.cpp
-│   ├── codegen.cpp
-│   └── main.cpp             ← CLI: invoke stages, flags for IR dump
-├── tests/
-│   ├── lexer_test.cpp
-│   ├── parser_test.cpp
-│   ├── sema_test.cpp        ← error case tests
-│   └── codegen_test.cpp     ← compare output against a clang baseline
-├── examples/
-│   ├── fibonacci.mc
-│   ├── sum_of_squares.mc
-│   ├── fizzbuzz.mc
-│   ├── gcd.mc
-│   ├── pointer_swap.mc
-│   ├── array_sum.mc
-│   ├── struct_point.mc
-│   ├── bit_ops.mc
-│   └── control_flow.mc
-└── docs/
-    ├── ROADMAP.md           ← build plan + language-coverage roadmap
-    ├── language_spec.md     ← BNF grammar + type rules
-    └── ir_walkthrough.md    ← annotated IR for each example program
-```
-
----
-
-## Build & Run
-
-**Dependencies:** LLVM 17+, CMake 3.20+, a C++17 compiler.
-
-```bash
-# macOS
-brew install llvm cmake
-
-# Ubuntu
-sudo apt install llvm cmake
-```
-
-### Configure & build
-
-Homebrew LLVM is installed locally at `/opt/homebrew/opt/llvm`. If
-`llvm-config` is not on PATH, `scripts/configure.sh` still uses the
-Homebrew path automatically.
-
-```bash
-./scripts/configure.sh
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-Manual configure command:
-
-```bash
-cmake -S . -B build -G Ninja -DLLVM_DIR="$(/opt/homebrew/opt/llvm/bin/llvm-config --cmakedir)"
-```
-
-### CLI usage
-
-```bash
-# Dump the token stream (lexer output)
-./build/minic examples/fibonacci.mc --emit-tokens
-
-# Dump the AST (parser output)
-./minic examples/fibonacci.mc --emit-ast
-
-# Compile to a native binary
-./minic examples/gcd.mc -o gcd
-
-# Dump LLVM IR (no optimization)
-./minic examples/fibonacci.mc --emit-ir
-
-# Dump LLVM IR after the -O2 pass pipeline
-./minic examples/fibonacci.mc -O2 --emit-ir
-
-# Compile without optimization (default)
-./minic examples/fibonacci.mc -o fibonacci_o0
-
-# Compile with LLVM -O2 optimization pipeline
-./minic examples/fibonacci.mc -O2 -o fibonacci_o2
-
-# Compare output against clang for correctness
-clang -x c examples/fibonacci.mc -o fibonacci_clang
-diff <(./fibonacci_o0) <(./fibonacci_clang)
-```
 
 ---
 
@@ -490,3 +432,137 @@ fibonacci.mc:12:20: error: wrong number of arguments to 'fibonacci' —
     return fibonacci(n - 1, n - 2) + fibonacci(n - 2);
            ^~~~~~~~~~
 ```
+
+---
+
+## Repo Structure
+
+```
+c-compiler-llvm/
+├── README.md
+├── LICENSE
+├── CMakeLists.txt
+├── scripts/
+│   └── configure.sh         ← sets LLVM_DIR and invokes cmake
+├── include/
+│   ├── token.h              ← token kinds and Token struct
+│   ├── lexer.h
+│   ├── ast.h                ← AST node hierarchy
+│   ├── parser.h
+│   ├── sema.h               ← semantic analyzer
+│   └── codegen.h
+├── src/
+│   ├── lexer.cpp
+│   ├── ast.cpp
+│   ├── parser.cpp
+│   ├── sema.cpp
+│   ├── codegen.cpp
+│   └── main.cpp             ← CLI: invoke stages, flags for IR dump
+├── tests/
+│   ├── lexer_test.cpp
+│   ├── smoke_test.cpp
+│   ├── parser_test.cpp
+│   ├── sema_test.cpp        ← error-case tests
+│   └── codegen_test.cpp     ← runs examples, diffs against clang baseline
+├── examples/
+│   ├── fibonacci.mc
+│   ├── sum_of_squares.mc
+│   ├── fizzbuzz.mc
+│   ├── gcd.mc
+│   ├── pointer_swap.mc
+│   ├── array_sum.mc
+│   ├── struct_point.mc
+│   ├── bit_ops.mc
+│   └── control_flow.mc
+└── docs/
+    ├── ROADMAP.md           ← build plan + language-coverage roadmap
+    ├── language_spec.md     ← BNF grammar + type rules
+    └── ir_walkthrough.md    ← annotated IR for each example program
+```
+
+---
+
+## Build & Run
+
+**Dependencies:** LLVM 17+, CMake 3.20+, a C++17 compiler, Ninja (recommended).
+
+```bash
+# macOS
+brew install llvm cmake ninja
+
+# Ubuntu
+sudo apt install llvm cmake ninja-build
+```
+
+### Configure & build
+
+Homebrew LLVM is installed locally at `/opt/homebrew/opt/llvm`. If
+`llvm-config` is not on PATH, `scripts/configure.sh` still uses the
+Homebrew path automatically.
+
+```bash
+./scripts/configure.sh        # configures with Ninja + correct LLVM_DIR
+cmake --build build           # compiles libminic_core.a, minic, and all tests
+ctest --test-dir build --output-on-failure
+```
+
+Manual configure command:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DLLVM_DIR="$(/opt/homebrew/opt/llvm/bin/llvm-config --cmakedir)"
+```
+
+### CLI usage
+
+```bash
+# Dump the token stream (lexer output)
+./build/minic examples/fibonacci.mc --emit-tokens
+
+# Dump the AST (parser output)
+./build/minic examples/fibonacci.mc --emit-ast
+
+# Dump LLVM IR (no optimization)
+./build/minic examples/fibonacci.mc --emit-ir
+
+# Dump LLVM IR after the -O2 pass pipeline
+./build/minic examples/fibonacci.mc -O2 --emit-ir
+
+# Compile to a native binary (default: -O0)
+./build/minic examples/gcd.mc -o gcd
+
+# Compile with LLVM -O2 optimization pipeline
+./build/minic examples/fibonacci.mc -O2 -o fibonacci_o2
+
+# Compare output against clang for correctness
+clang -x c examples/fibonacci.mc -o fibonacci_clang
+diff <(./fibonacci_o2) <(./fibonacci_clang)
+```
+
+---
+
+## License
+
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for the full text.
+
+---
+
+## References
+
+**Compiler theory**
+- Aho, Lam, Sethi, Ullman. *Compilers: Principles, Techniques, and Tools* (2nd ed., "Dragon Book"). Addison-Wesley, 2006. — The standard reference for lexer/parser/semantic-analysis theory; Chapter 6 covers intermediate code generation.
+- Cooper, Torczon. *Engineering a Compiler* (3rd ed.). Morgan Kaufmann, 2022. — A modern alternative with clearer SSA and optimization coverage; Chapter 9 covers register allocation.
+- Appel. *Modern Compiler Implementation in C*. Cambridge University Press, 1998. — Compact treatment of tree-walking IR generation close to what MiniC does.
+
+**LLVM**
+- LLVM Project. [LLVM Language Reference Manual](https://llvm.org/docs/LangRef.html). — Definitive reference for LLVM IR types, instructions, and calling conventions.
+- LLVM Project. [LLVM Programmer's Manual](https://llvm.org/docs/ProgrammersManual.html). — Guide to the C++ API used in the IR generator (`IRBuilder<>`, `Module`, `Function`, `BasicBlock`).
+- LLVM Project. [Writing an LLVM Pass](https://llvm.org/docs/WritingAnLLVMPass.html). — Background on the new pass manager used for `-O1`/`-O2`/`-O3`.
+- Lattner, Adve. "LLVM: A Compilation Framework for Lifelong Program Analysis & Transformation." *CGO 2004*. — The original paper introducing LLVM's design philosophy.
+
+**Recursive-descent parsing**
+- Grune, Jacobs. *Parsing Techniques: A Practical Guide* (2nd ed.). Springer, 2008. — Chapter 6 covers recursive-descent and LL parsing in depth.
+- Nystrom. [*Crafting Interpreters*](https://craftinginterpreters.com). Free online. — Excellent walkthrough of hand-writing a recursive-descent parser and tree-walking evaluator; closely mirrors MiniC's parser structure.
+
+**C language semantics**
+- ISO/IEC 9899:2018. *Programming Languages — C* (C17 standard). — The normative reference for type promotion rules (§6.3), integer arithmetic (§6.5), and pointer semantics (§6.3.2) that MiniC's semantic analyzer enforces.
